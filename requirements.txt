@@ -7,5 +7,6 @@ django-environ
 django-cors-headers
 drf-spectacular
 boto3
+razorpay
 pytest
 pytest-django

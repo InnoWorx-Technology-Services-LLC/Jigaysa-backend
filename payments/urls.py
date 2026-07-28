@@ -1,8 +1,9 @@
 """Payments routes (PRD §3.3, §3.4, §3.13). Mounted at ``/api/v1/``."""
 
+from django.urls import path
 from rest_framework.routers import DefaultRouter
 
-from payments import views
+from payments import views, webhooks
 
 app_name = "payments"
 
@@ -15,4 +16,12 @@ router.register("orders", views.OrderViewSet, basename="order")
 router.register("invoices", views.InvoiceViewSet, basename="invoice")
 router.register("subscriptions", views.SubscriptionViewSet, basename="subscription")
 
-urlpatterns = router.urls
+urlpatterns = [
+    # Gateway → server callback. Unauthenticated by design (verified by HMAC).
+    path(
+        "payments/webhook/razorpay/",
+        webhooks.RazorpayWebhookView.as_view(),
+        name="razorpay-webhook",
+    ),
+    *router.urls,
+]

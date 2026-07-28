@@ -2,9 +2,19 @@
 
 Kept out of the views so the money math (line items → discount → GST → total) and
 the fulfilment side-effects (paid enrollment, subscription activation) live in one
-auditable place. A real gateway (Razorpay/Stripe/UPI) slots into ``pay_order`` —
-for now payment is confirmed synchronously (``mock`` gateway) so the rest of the
-student flow works end to end.
+auditable place.
+
+Two payment paths converge on ``_settle``:
+
+* **Razorpay** (production) — ``start_checkout`` creates the gateway order,
+  then either ``confirm_checkout`` (browser handler payload) or the webhook
+  (``confirm_webhook_payment``) settles it. Both verify a signature first.
+* **Mock** (``pay_order``) — synchronous confirmation, allowed only when no
+  Razorpay keys are configured, so dev and the test suite keep working.
+
+Every settlement is idempotent: a second confirmation of the same order is a
+no-op that returns the existing successful payment. That matters because
+Razorpay retries webhooks and the browser handler can race the webhook.
 """
 
 from datetime import timedelta
@@ -15,6 +25,7 @@ from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
 from courses.models import Course
+from payments import gateway
 from payments.models import (
     Coupon,
     CoursePrice,
@@ -168,26 +179,25 @@ def _next_invoice_number():
     return f"JIG-{year}-{seq:04d}"
 
 
-@transaction.atomic
-def pay_order(order, gateway="mock", payment_method=None, gateway_payment_id=""):
-    """Confirm payment for an order, generate its invoice and fulfil it.
+def _existing_success(order):
+    return order.payments.filter(status=Payment.Status.SUCCESS).first()
 
-    Idempotent: paying an already-paid order returns the existing payment.
-    """
-    if order.status == Order.Status.PAID:
-        return order.payments.filter(status=Payment.Status.SUCCESS).first()
+
+def _assert_payable(order):
     if order.status == Order.Status.REFUNDED:
         raise ValidationError("This order was refunded and cannot be paid.")
+    if order.total <= 0:
+        raise ValidationError("This order has nothing to pay.")
 
-    payment = Payment.objects.create(
-        order=order,
-        gateway=gateway if gateway != "mock" else Payment.Gateway.RAZORPAY,
-        gateway_payment_id=gateway_payment_id or f"mock_{order.pk}_{timezone.now():%H%M%S}",
-        amount=order.total,
-        method=(payment_method.type if payment_method else "mock"),
-        status=Payment.Status.SUCCESS,
-        paid_at=timezone.now(),
-    )
+
+@transaction.atomic
+def _settle(order, payment):
+    """Mark ``order`` paid, invoice it and grant what was bought.
+
+    ``payment`` must already be saved with SUCCESS status. Callers are
+    responsible for verifying the money actually moved — this function trusts
+    them, so never call it straight from a request body.
+    """
     order.status = Order.Status.PAID
     order.save(update_fields=["status", "updated_at"])
 
@@ -207,6 +217,174 @@ def pay_order(order, gateway="mock", payment_method=None, gateway_payment_id="")
         )
     _fulfil_order(order)
     return payment
+
+
+# --------------------------------------------------------------------------- #
+# Razorpay path
+# --------------------------------------------------------------------------- #
+
+
+@transaction.atomic
+def start_checkout(order):
+    """Create (or reuse) the Razorpay order for ``order``.
+
+    Returns ``(payment, razorpay_order)``. Reusing an existing pending Payment
+    row means a student who abandons and reopens checkout doesn't accumulate
+    orphan gateway orders — and the amount can't drift, because the row is
+    keyed to this Order's total.
+    """
+    _assert_payable(order)
+    if order.status == Order.Status.PAID:
+        raise ValidationError("This order is already paid.")
+
+    existing = (
+        order.payments.filter(
+            status=Payment.Status.CREATED, gateway=Payment.Gateway.RAZORPAY
+        )
+        .exclude(gateway_order_id="")
+        .first()
+    )
+    if existing and existing.amount == order.total:
+        return existing, existing.raw.get("gateway_order", {})
+
+    rzp_order = gateway.create_order(
+        amount=order.total,
+        receipt=order.pk,
+        notes={"order_id": str(order.pk), "user_id": str(order.user_id),
+               "email": order.user.email},
+        currency=order.currency,
+    )
+    payment = Payment.objects.create(
+        order=order,
+        gateway=Payment.Gateway.RAZORPAY,
+        gateway_order_id=rzp_order["id"],
+        amount=order.total,
+        status=Payment.Status.CREATED,
+        raw={"gateway_order": dict(rzp_order)},
+    )
+    return payment, rzp_order
+
+
+def confirm_checkout(order, razorpay_order_id, razorpay_payment_id, signature):
+    """Settle ``order`` from the browser's Razorpay Checkout handler payload.
+
+    Verifies, in this order: the signature is genuine, the gateway order id
+    belongs to *this* order, and the captured amount matches what we billed.
+    Any of those failing means the payload was tampered with or replayed.
+    """
+    paid = _existing_success(order)
+    if paid:
+        return paid  # webhook (or a double submit) already settled it
+    _assert_payable(order)
+
+    payment = order.payments.filter(gateway_order_id=razorpay_order_id).first()
+    if payment is None:
+        # The signature may well be valid — for somebody else's order. Refusing
+        # here is what stops a cheap order's receipt paying for an expensive one.
+        raise ValidationError("This payment does not belong to this order.")
+
+    gateway.verify_checkout_signature(
+        razorpay_order_id, razorpay_payment_id, signature
+    )
+
+    remote = gateway.fetch_payment(razorpay_payment_id)
+    _assert_remote_matches(remote, payment)
+
+    return _record_success(payment, remote, razorpay_payment_id)
+
+
+def confirm_webhook_payment(razorpay_order_id, razorpay_payment_id, remote):
+    """Settle from a verified ``payment.captured`` webhook. Returns the Payment,
+    or ``None`` when the event is for an order we don't know about."""
+    payment = (
+        Payment.objects.select_related("order")
+        .filter(gateway_order_id=razorpay_order_id)
+        .first()
+    )
+    if payment is None:
+        return None
+    order = payment.order
+    paid = _existing_success(order)
+    if paid:
+        return paid  # already settled by the browser handler or an earlier retry
+    if order.status == Order.Status.REFUNDED:
+        return None
+
+    _assert_remote_matches(remote, payment)
+    return _record_success(payment, remote, razorpay_payment_id)
+
+
+def _assert_remote_matches(remote, payment):
+    """Guard against a genuine-but-wrong payment being applied to this order."""
+    if str(remote.get("status")) not in ("captured", "authorized"):
+        raise ValidationError(
+            f"Payment is not captured (status: {remote.get('status')})."
+        )
+    charged = gateway.from_minor_units(remote.get("amount") or 0)
+    if charged != money(payment.amount):
+        raise ValidationError(
+            f"Paid amount {charged} does not match the order total {payment.amount}."
+        )
+
+
+@transaction.atomic
+def _record_success(payment, remote, razorpay_payment_id):
+    payment.gateway_payment_id = razorpay_payment_id
+    payment.status = Payment.Status.SUCCESS
+    payment.method = str(remote.get("method") or "")[:40]
+    payment.paid_at = timezone.now()
+    payment.raw = {**(payment.raw or {}), "payment": dict(remote)}
+    payment.save(
+        update_fields=[
+            "gateway_payment_id", "status", "method", "paid_at", "raw", "updated_at"
+        ]
+    )
+    return _settle(payment.order, payment)
+
+
+def mark_failed(order, razorpay_order_id, remote=None):
+    """Record a failed attempt without touching the order — the student can
+    retry, and ``start_checkout`` will hand back the same gateway order."""
+    payment = order.payments.filter(gateway_order_id=razorpay_order_id).first()
+    if payment is None or payment.status == Payment.Status.SUCCESS:
+        return payment
+    payment.status = Payment.Status.FAILED
+    payment.raw = {**(payment.raw or {}), "failure": dict(remote or {})}
+    payment.save(update_fields=["status", "raw", "updated_at"])
+    return payment
+
+
+# --------------------------------------------------------------------------- #
+# Mock path (no gateway configured)
+# --------------------------------------------------------------------------- #
+
+
+@transaction.atomic
+def pay_order(order, gateway_name="mock", payment_method=None, gateway_payment_id=""):
+    """Confirm an order synchronously, with no gateway involved.
+
+    Only reachable when Razorpay is unconfigured — the view enforces that. Kept
+    so local development and the test suite can exercise fulfilment without
+    network calls. Idempotent.
+    """
+    if order.status == Order.Status.PAID:
+        return _existing_success(order)
+    _assert_payable(order)
+
+    payment = Payment.objects.create(
+        order=order,
+        gateway=(
+            gateway_name if gateway_name != "mock" else Payment.Gateway.RAZORPAY
+        ),
+        gateway_payment_id=(
+            gateway_payment_id or f"mock_{order.pk}_{timezone.now():%H%M%S}"
+        ),
+        amount=order.total,
+        method=(payment_method.type if payment_method else "mock"),
+        status=Payment.Status.SUCCESS,
+        paid_at=timezone.now(),
+    )
+    return _settle(order, payment)
 
 
 def _fulfil_order(order):

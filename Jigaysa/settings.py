@@ -184,11 +184,14 @@ SPECTACULAR_SETTINGS = {
         "**Student modules live:** Auth (incl. OTP + password reset), Courses & "
         "enrollment, Free Library, Live Classes, Assessments, Discussions & "
         "Community, Notifications, Payments, File Uploads.\n\n"
-        "> ⚠️ **Payments run on a MOCK gateway for now.** Checkout, GST "
-        "invoicing, coupons and access-granting all work end to end, but "
-        "`POST /orders/{id}/pay/` confirms payment synchronously with a stub — "
-        "**no real Razorpay/Stripe/PayPal/UPI integration and no money moves yet.** "
-        "Real gateway + webhook verification is pending.\n\n"
+        "> 💳 **Payments run on Razorpay.** Checkout flow: `POST /orders/` → "
+        "`POST /orders/{id}/checkout/` (returns Razorpay order params) → open "
+        "Razorpay Checkout in the browser → `POST /orders/{id}/verify/` with the "
+        "handler payload. The `payment.captured` webhook at "
+        "`POST /payments/webhook/razorpay/` is the authoritative confirmation and "
+        "fulfils the order even if the browser is closed mid-payment. "
+        "`POST /orders/{id}/pay/` is a **mock** confirmation that only works when "
+        "no Razorpay keys are configured (dev/test).\n\n"
         "> Also pending: refunds, EMI/installments, pay-per-session checkout, "
         "corporate/group pricing, referral credits. Recordings (§3.11) and "
         "Smart Classroom (§3.7–3.8) are not exposed yet."
@@ -206,6 +209,22 @@ CORS_ALLOWED_ORIGINS = env("CORS_ALLOWED_ORIGINS")
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https?://([\w-]+\.)*jigyaasaa\.com$",
 ]
+
+# Public URL of the student web app. Used for Razorpay checkout branding and
+# the post-payment redirect; also the origin the browser calls this API from.
+FRONTEND_URL = env("FRONTEND_URL", default="http://localhost:3000")
+
+# --- Razorpay (PRD §3.13) ---------------------------------------------------
+# Leave RAZORPAY_KEY_ID empty to disable the gateway; checkout then falls back
+# to the mock confirmation in payments.services.pay_order (dev/test only).
+# RAZORPAY_WEBHOOK_SECRET is set when creating the webhook in the Razorpay
+# dashboard and is intentionally different from the API secret.
+RAZORPAY_KEY_ID = env("RAZORPAY_KEY_ID", default="")
+RAZORPAY_KEY_SECRET = env("RAZORPAY_KEY_SECRET", default="")
+RAZORPAY_WEBHOOK_SECRET = env("RAZORPAY_WEBHOOK_SECRET", default="")
+# Company name / logo shown inside the Razorpay Checkout modal.
+RAZORPAY_CHECKOUT_NAME = env("RAZORPAY_CHECKOUT_NAME", default="Jigyaasaa")
+RAZORPAY_CHECKOUT_LOGO = env("RAZORPAY_CHECKOUT_LOGO", default="")
 
 # Pluggable SMS/OTP provider (mock console provider in dev).
 SMS_PROVIDER = env("SMS_PROVIDER", default="accounts.providers.ConsoleSMSProvider")

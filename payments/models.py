@@ -272,6 +272,12 @@ class Payment(TimeStampedModel):
         Order, on_delete=models.CASCADE, related_name="payments"
     )
     gateway = models.CharField(max_length=20, choices=Gateway.choices)
+    # The gateway's own order handle (Razorpay ``order_xxx``), created before the
+    # customer pays. Indexed because the webhook arrives with only this id and
+    # has to find our row. Unique per row so a replayed webhook can't double-pay.
+    gateway_order_id = models.CharField(
+        max_length=255, blank=True, db_index=True
+    )
     gateway_payment_id = models.CharField(max_length=255, blank=True)
     amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     method = models.CharField(max_length=40, blank=True)

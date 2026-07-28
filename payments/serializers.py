@@ -74,8 +74,8 @@ class PaymentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Payment
         fields = (
-            "id", "gateway", "gateway_payment_id", "amount", "method",
-            "status", "paid_at",
+            "id", "gateway", "gateway_order_id", "gateway_payment_id", "amount",
+            "method", "status", "paid_at",
         )
 
 
@@ -124,6 +124,37 @@ class PaySerializer(serializers.Serializer):
     )
     payment_method_id = serializers.IntegerField(required=False)
     gateway_payment_id = serializers.CharField(required=False, allow_blank=True)
+
+
+class RazorpayCheckoutSerializer(serializers.Serializer):
+    """Everything the frontend needs to open Razorpay Checkout.
+
+    Response-only — documents the shape of ``POST /orders/{id}/checkout/``.
+    ``amount`` is in **paise** because that is what Checkout expects; ``key`` is
+    the *public* key id and is safe to ship to the browser.
+    """
+
+    key = serializers.CharField()
+    razorpay_order_id = serializers.CharField()
+    amount = serializers.IntegerField(help_text="In paise (smallest currency unit).")
+    amount_display = serializers.DecimalField(max_digits=12, decimal_places=2)
+    currency = serializers.CharField()
+    name = serializers.CharField()
+    description = serializers.CharField()
+    image = serializers.CharField(allow_blank=True)
+    order_id = serializers.IntegerField(help_text="Our own Order id.")
+    prefill = serializers.DictField()
+    notes = serializers.DictField()
+    callback_url = serializers.CharField()
+    is_test_mode = serializers.BooleanField()
+
+
+class RazorpayVerifySerializer(serializers.Serializer):
+    """The payload Razorpay Checkout's ``handler`` hands back to the browser."""
+
+    razorpay_order_id = serializers.CharField()
+    razorpay_payment_id = serializers.CharField()
+    razorpay_signature = serializers.CharField()
 
 
 class CouponValidateSerializer(serializers.Serializer):
