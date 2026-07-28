@@ -181,6 +181,10 @@ class Lesson(TimeStampedModel):
     order = models.PositiveIntegerField(default=0)
     duration_minutes = models.PositiveIntegerField(default=0)
     video_url = models.URLField(blank=True)
+    # S3/R2 object key for a privately-stored lesson video. When set, the player
+    # serves a short-lived presigned URL instead of ``video_url`` (see
+    # core.storage). Upload via POST /api/v1/uploads/presign/ (purpose lesson_video).
+    video_key = models.CharField(max_length=1024, blank=True)
     content = models.TextField(blank=True)
     is_preview = models.BooleanField(default=False)
     assessment = models.ForeignKey(

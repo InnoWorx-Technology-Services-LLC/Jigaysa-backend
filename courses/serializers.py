@@ -67,6 +67,7 @@ class LessonSerializer(serializers.ModelSerializer):
             "order",
             "duration_minutes",
             "video_url",
+            "video_key",
             "content",
             "is_preview",
             "assessment",
@@ -76,13 +77,23 @@ class LessonSerializer(serializers.ModelSerializer):
 
 
 class LessonPlayerSerializer(serializers.ModelSerializer):
-    """Student-facing lesson shape. Gated content (video/body) is hidden unless
-    the requester may access it (preview lesson, enrolled, owner or admin)."""
+    """Student-facing lesson shape for the course player.
+
+    Gated content (video/body) is hidden unless the requester may access it
+    (preview lesson, enrolled, owner or admin). Per-lesson progress
+    (``completed``/``watch_pct``/``last_position_seconds``) is folded in from the
+    student's ``LessonProgress`` via a ``progress_map`` in context, so the player
+    can render the completion ticks and resume point from one call. Private
+    videos (``video_key``) are returned as a short-lived presigned URL.
+    """
 
     locked = serializers.SerializerMethodField()
     video_url = serializers.SerializerMethodField()
     content = serializers.SerializerMethodField()
     resources = serializers.SerializerMethodField()
+    completed = serializers.SerializerMethodField()
+    watch_pct = serializers.SerializerMethodField()
+    last_position_seconds = serializers.SerializerMethodField()
 
     class Meta:
         model = Lesson
@@ -98,6 +109,9 @@ class LessonPlayerSerializer(serializers.ModelSerializer):
             "video_url",
             "content",
             "resources",
+            "completed",
+            "watch_pct",
+            "last_position_seconds",
         )
 
     def _accessible(self, obj):
@@ -105,11 +119,26 @@ class LessonPlayerSerializer(serializers.ModelSerializer):
             return True
         return bool(self.context.get("has_access"))
 
+    def _progress(self, obj):
+        return (self.context.get("progress_map") or {}).get(obj.id)
+
     def get_locked(self, obj):
         return not self._accessible(obj)
 
     def get_video_url(self, obj):
-        return obj.video_url if self._accessible(obj) else ""
+        """Playable URL: a presigned link for private ``video_key`` objects,
+        else the stored ``video_url``. Empty when the lesson is locked."""
+        if not self._accessible(obj):
+            return ""
+        if obj.video_key:
+            try:
+                from core import storage
+
+                if storage.is_configured():
+                    return storage.generate_presigned_download(obj.video_key)
+            except Exception:
+                pass  # fall back to the stored URL rather than 500
+        return obj.video_url
 
     def get_content(self, obj):
         return obj.content if self._accessible(obj) else ""
@@ -118,6 +147,18 @@ class LessonPlayerSerializer(serializers.ModelSerializer):
         if not self._accessible(obj):
             return []
         return LessonResourceSerializer(obj.resources.all(), many=True).data
+
+    def get_completed(self, obj):
+        p = self._progress(obj)
+        return bool(p and p["completed"])
+
+    def get_watch_pct(self, obj):
+        p = self._progress(obj)
+        return p["watch_pct"] if p else 0
+
+    def get_last_position_seconds(self, obj):
+        p = self._progress(obj)
+        return p["last_position_seconds"] if p else 0
 
 
 class ModuleSerializer(serializers.ModelSerializer):

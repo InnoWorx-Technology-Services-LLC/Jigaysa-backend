@@ -224,19 +224,41 @@ class CourseViewSet(viewsets.ModelViewSet):
         users who are not enrolled / the owner / an admin."""
         course = self.get_object()
         user = request.user
+        enrollment = Enrollment.objects.filter(student=user, course=course).first()
         has_access = (
             _is_admin(user)
             or course.trainer_id == user.id
-            or Enrollment.objects.filter(student=user, course=course).exists()
+            or enrollment is not None
         )
+
+        # Fold the student's per-lesson progress in so the player renders the
+        # completion ticks / resume point from this single call.
+        progress_map = {}
+        if enrollment is not None:
+            for lp in LessonProgress.objects.filter(enrollment=enrollment).values(
+                "lesson_id", "status", "watch_pct", "last_position_seconds"
+            ):
+                progress_map[lp["lesson_id"]] = {
+                    "completed": lp["status"] == LessonProgress.Status.COMPLETED,
+                    "watch_pct": lp["watch_pct"],
+                    "last_position_seconds": lp["last_position_seconds"],
+                }
+
         modules = course.modules.prefetch_related("lessons__resources")
         serializer = ModulePlayerSerializer(
-            modules, many=True, context={"has_access": has_access}
+            modules,
+            many=True,
+            context={
+                "has_access": has_access,
+                "progress_map": progress_map,
+                "request": request,
+            },
         )
         return Response(
             {
                 "course": course.slug,
                 "has_access": has_access,
+                "progress_pct": enrollment.progress_pct if enrollment else 0,
                 "modules": serializer.data,
             }
         )

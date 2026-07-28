@@ -46,6 +46,12 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
 
+            echo "==> Activating virtualenv"
+            source .venv/bin/activate
+
+            echo "==> Running database migrations"
+            python manage.py migrate --noinput
+
             echo "==> Restarting application service"
             sudo systemctl restart ${{ secrets.SERVICE_NAME }}
 
