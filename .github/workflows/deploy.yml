@@ -47,7 +47,7 @@ jobs:
             git reset --hard origin/main
 
             echo "==> Activating virtualenv"
-            source .venv/bin/activate
+            source .ENV/bin/activate
 
             echo "==> Running database migrations"
             python manage.py migrate --noinput
