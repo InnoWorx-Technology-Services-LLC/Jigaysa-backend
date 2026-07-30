@@ -112,6 +112,95 @@ def fetch_payment(payment_id) -> dict:
         raise GatewayError(str(exc)) from exc
 
 
+class RefundNotPossible(RuntimeError):
+    """Razorpay refused the refund for a reason retrying cannot fix.
+
+    Distinct from ``GatewayError`` on purpose: a network blip should be retried,
+    a payment that is too old to refund never will be. The caller uses this to
+    decide between "try again later" and "escalate to a human".
+    """
+
+
+class InsufficientBalance(RuntimeError):
+    """Razorpay has no float to refund from — the money is already settled out.
+
+    Retryable, but only after the merchant balance is topped up, which is a
+    human action. Kept separate from ``RefundNotPossible`` so the obligation
+    stays open instead of being written off.
+    """
+
+
+# Razorpay error descriptions are prose, not codes, so matching is fuzzy by
+# necessity. Anything unmatched is treated as retryable — the safe default,
+# because a wrongly-terminal refund silently keeps a student's money.
+_INSUFFICIENT_BALANCE_HINTS = (
+    "insufficient balance",
+    "not have sufficient balance",
+    "balance is insufficient",
+)
+_PERMANENT_HINTS = (
+    "fully refunded",
+    "has already been refunded",
+    "is not captured",
+    "does not exist",
+    "invalid id",
+    "cannot be refunded",
+    "refund amount is greater",
+)
+
+
+def classify_refund_error(message: str):
+    """Map a Razorpay error string to the exception the caller should see."""
+    text = (message or "").lower()
+    if any(h in text for h in _INSUFFICIENT_BALANCE_HINTS):
+        return InsufficientBalance(message)
+    if any(h in text for h in _PERMANENT_HINTS):
+        return RefundNotPossible(message)
+    return GatewayError(message)
+
+
+def refund_payment(payment_id, amount, notes=None, speed="normal") -> dict:
+    """Refund ``amount`` rupees against a captured Razorpay payment.
+
+    ``speed="normal"`` settles in 5-7 working days from the merchant balance;
+    ``"optimum"`` is Razorpay's instant refund and costs extra. Returns the raw
+    refund dict, whose ``status`` is ``pending`` or ``processed`` — the
+    ``refund.processed`` / ``refund.failed`` webhook is what settles it for real,
+    exactly like payments.
+
+    Raises ``InsufficientBalance`` / ``RefundNotPossible`` / ``GatewayError``
+    so the caller can tell a retry from an escalation.
+    """
+    try:
+        return _client().payment.refund(
+            payment_id,
+            {
+                "amount": to_minor_units(amount),
+                "speed": speed,
+                "notes": notes or {},
+            },
+        )
+    except GatewayNotConfigured:
+        raise
+    except Exception as exc:
+        raise classify_refund_error(str(exc)) from exc
+
+
+def fetch_refunds(payment_id) -> list:
+    """List Razorpay's refunds for a payment — the source of truth.
+
+    Used before retrying: if a request timed out we cannot know whether the
+    refund was created, and asking is the only way to avoid refunding twice.
+    """
+    try:
+        result = _client().payment.fetch_multiple_refund(payment_id)
+    except GatewayNotConfigured:
+        raise
+    except Exception as exc:
+        raise GatewayError(str(exc)) from exc
+    return (result or {}).get("items", []) or []
+
+
 def _hmac_sha256(message: str, secret: str) -> str:
     return hmac.new(
         secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256

@@ -225,16 +225,38 @@ Student **or** trainer, while `pending` / `awaiting_payment` / `confirmed`.
 Frees the slot and notifies the other party.
 
 ```json
-{ "...booking fields...": "…", "refund_requested": true, "paid": true }
+{
+  "...booking fields...": "…",
+  "paid": true,
+  "refund_requested": true,
+  "refund_status": "requested",
+  "refund_sent": true
+}
 ```
 
 - `refund_requested: true` — the **trainer** cancelled a paid session, so the fee
-  is recorded as owed back. Tell the student a refund is being processed.
+  is owed back and a refund was attempted immediately.
 - If the **student** cancels a paid session, `refund_requested` is `false` — no
   automatic refund. Point them at support.
 
-> Refunds are **recorded, not executed**: an admin settles them manually. There
-> is no student-facing refund endpoint (PRD §3.13 refunds is not built).
+**What to show the student**, from the two refund fields:
+
+| `refund_sent` | `refund_status` | Message |
+|---|---|---|
+| `true` | `requested` | "Refund on its way — 5–7 working days." |
+| `true` | `processed` | "Refunded." |
+| `false` | `requested` | "Refund pending — our team is processing it." **Do not promise a date**; it hasn't left the gateway |
+| — | `failed` | "Refund needs manual processing — support will contact you." |
+
+`refund_status` mirrors the `Refund` record: `requested` → in flight or owed,
+`processed` → money returned, `failed` → needs a human. The transition to
+`processed` is driven by Razorpay's `refund.processed` webhook, so poll the
+booking (or the notification bell) rather than assuming the cancel response is
+final.
+
+> There is still **no student-facing refund endpoint** — a student cannot request
+> a refund themselves, only see the status of one triggered by a trainer
+> cancellation.
 
 **`400`** `This booking is already cancelled.` on a repeat call.
 
@@ -270,14 +292,37 @@ Delivered through the existing bell (`GET /notifications/`), category
 
 ---
 
-## 10. Not built — don't build UI for it
+## 10. Ops — two scheduled commands are required
 
-- **Rescheduling.** A mentor with an emergency can only cancel, which for a paid
-  session records a refund. There is no "propose a new time" flow.
-- **Student-facing refunds.** No request endpoint, no status to poll.
+Neither is optional; without them the flow leaks slots and money.
+
+```bash
+python manage.py expire_unpaid_bookings   # every 15 min
+python manage.py retry_refunds            # hourly
+```
+
+- **`expire_unpaid_bookings`** — cancels accepted-but-unpaid bookings past
+  `payment_due_at` and frees the slot. Until it runs, an unpaid booking keeps
+  holding the mentor's hour.
+- **`retry_refunds`** — re-sends refunds that were recorded but never reached
+  Razorpay (insufficient merchant balance, or a network failure). It asks
+  Razorpay what already exists before re-sending, so a timed-out-but-successful
+  call is adopted, never paid twice. Safe to run repeatedly; both support
+  `--dry-run`.
+
+Also add **`refund.processed`** and **`refund.failed`** to the Razorpay dashboard
+webhook alongside the existing `payment.*` events — that is what moves a refund
+to its final state.
+
+---
+
+## 11. Not built — don't build UI for it
+
+- **Rescheduling.** A mentor with an emergency can only cancel, which refunds a
+  paid session. There is no "propose a new time" flow.
+- **Student-facing refund requests.** A student can see a refund's status but
+  cannot start one.
+- **Partial refunds** (e.g. late-cancellation fees) — refunds are always the
+  full payment.
 - **Recurring / package bookings**, group 1:1s, mentor-side availability
   suggestions.
-- **Automatic expiry without ops setup** — slot release runs from
-  `python manage.py expire_unpaid_bookings`, which must be scheduled (every 15
-  min is plenty). Until it runs, an unpaid booking still shows as
-  `awaiting_payment`.

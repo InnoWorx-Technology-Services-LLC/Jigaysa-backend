@@ -28,11 +28,17 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from payments import gateway, services
-from payments.models import Payment
+from payments.models import Payment, Refund
 
 logger = logging.getLogger(__name__)
 
-HANDLED_EVENTS = ("payment.captured", "payment.failed")
+HANDLED_EVENTS = (
+    "payment.captured",
+    "payment.failed",
+    "refund.processed",
+    "refund.failed",
+)
+REFUND_EVENTS = ("refund.processed", "refund.failed")
 
 
 class RazorpayWebhookView(APIView):
@@ -73,6 +79,12 @@ class RazorpayWebhookView(APIView):
         event_type = event.get("event")
         if event_type not in HANDLED_EVENTS:
             return Response({"status": "ignored", "event": event_type})
+
+        if event_type in REFUND_EVENTS:
+            entity = (
+                event.get("payload", {}).get("refund", {}).get("entity", {}) or {}
+            )
+            return self._handle_refund(event_type, entity)
 
         entity = (
             event.get("payload", {}).get("payment", {}).get("entity", {}) or {}
@@ -124,3 +136,41 @@ class RazorpayWebhookView(APIView):
             )
             return Response({"status": "unknown_order"})
         return Response({"status": "ok", "order": payment.order_id})
+
+    def _handle_refund(self, event_type, entity):
+        """Settle a refund we sent. This is the authoritative outcome.
+
+        A refund can sit ``pending`` at Razorpay for days, so the API response
+        at send time is only a receipt — this is where the money is actually
+        confirmed returned, or confirmed stuck.
+        """
+        refund_id = entity.get("id")
+        refund = None
+        if refund_id:
+            refund = Refund.objects.filter(gateway_refund_id=refund_id).first()
+        if refund is None:
+            # A refund issued straight from the Razorpay dashboard has no row
+            # here. Adopt it against the payment so our books still balance.
+            refund = self._adopt_dashboard_refund(entity)
+        if refund is None:
+            logger.warning("Razorpay refund webhook for unknown refund %s", refund_id)
+            return Response({"status": "unknown_refund"})
+
+        if event_type == "refund.failed":
+            services._mark_refund_failed(refund, "Gateway reported refund.failed.")
+        else:
+            services._mark_refund_processed(refund, entity)
+        return Response({"status": "ok", "refund": refund.pk})
+
+    def _adopt_dashboard_refund(self, entity):
+        payment = Payment.objects.filter(
+            gateway_payment_id=entity.get("payment_id") or ""
+        ).first()
+        if payment is None:
+            return None
+        return Refund.objects.create(
+            payment=payment,
+            gateway_refund_id=entity.get("id") or "",
+            amount=gateway.from_minor_units(entity.get("amount") or 0),
+            reason="Refunded from the Razorpay dashboard.",
+        )

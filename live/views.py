@@ -464,9 +464,13 @@ class IndividualBookingViewSet(
                 booking,
                 "1:1 booking cancelled",
                 f"Your session “{booking.topic or 'with your mentor'}” was cancelled."
-                + (" Your payment will be refunded." if refunds else ""),
+                + (" Your payment is being refunded." if refunds else ""),
             )
         response.data["refund_requested"] = bool(refunds)
+        response.data["refund_status"] = refunds[0].status if refunds else None
+        # False means the money is owed but hasn't left the gateway yet — the UI
+        # must not promise a timeline it can't keep.
+        response.data["refund_sent"] = bool(refunds and refunds[0].is_sent)
         response.data["paid"] = self._is_paid(booking)
         return response
 

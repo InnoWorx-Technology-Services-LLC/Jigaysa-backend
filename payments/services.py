@@ -17,6 +17,7 @@ no-op that returns the existing successful payment. That matters because
 Razorpay retries webhooks and the browser handler can race the webhook.
 """
 
+import logging
 from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -37,6 +38,8 @@ from payments.models import (
     Refund,
     Subscription,
 )
+
+logger = logging.getLogger(__name__)
 
 # GST rate applied to the discounted subtotal (PRD §3.3 Taxes/GST).
 GST_PERCENT = Decimal("18")
@@ -470,24 +473,155 @@ def _confirm_paid_booking(order, booking_id):
         request_refund(order, reason=f"Booking #{booking.pk} was no longer payable.")
 
 
-def request_refund(order, reason=""):
-    """Record money owed back to the buyer, without moving it.
+def request_refund(order, reason="", send=True):
+    """Record money owed back to the buyer, then try to actually send it.
 
-    Deliberately does **not** call the gateway: refunds are settled by an admin
-    for now (PRD §3.13 refunds is unbuilt). The row is the obligation — an
-    unpaid ``Refund`` is a debt the platform can be held to, which is the point.
-    The order stays ``paid`` because the money has not actually come back yet.
-    Idempotent: one open refund per payment.
+    The ``Refund`` row is written **first and always**, even if the gateway call
+    then fails. That ordering is the whole safety property: an unsent refund is
+    a visible debt someone can chase, whereas a gateway call made without a row
+    behind it is money that moved with no record.
+
+    Never raises. A refund that cannot be sent right now is not a reason to fail
+    the cancellation that triggered it — the student's session is cancelled
+    either way, and the debt is on the books.
     """
-    refunded = []
+    refunds = []
     for payment in order.payments.filter(status=Payment.Status.SUCCESS):
-        refund, _ = Refund.objects.get_or_create(
+        # One open refund per payment. A previously *failed* one does not block
+        # a fresh attempt, but an outstanding or settled one does — that is what
+        # stops a double cancellation becoming a double refund.
+        refund = Refund.objects.filter(
             payment=payment,
-            status=Refund.Status.REQUESTED,
-            defaults={"amount": payment.amount, "reason": reason[:255]},
+            status__in=(Refund.Status.REQUESTED, Refund.Status.PROCESSED),
+        ).first()
+        if refund is None:
+            refund = Refund.objects.create(
+                payment=payment, amount=payment.amount, reason=reason[:255]
+            )
+        if send and refund.status == Refund.Status.REQUESTED and not refund.is_sent:
+            send_refund(refund)
+        refunds.append(refund)
+    return refunds
+
+
+def send_refund(refund):
+    """Push one recorded refund to Razorpay. Returns the updated ``Refund``.
+
+    Outcomes, and why each is handled the way it is:
+
+    * **no gateway configured** — leave it ``requested``; an admin settles it.
+      This is also the dev/test path.
+    * **already refunded at Razorpay** — not an error. Our row simply hadn't
+      caught up (a timed-out call that actually succeeded, or a dashboard
+      refund). Mark it processed.
+    * **insufficient balance** — the takings are already settled to the bank, so
+      there is no float to refund from. Stays ``requested`` so the debt is still
+      owed, and an admin retries after topping up. *Not* marked failed: failed
+      would read as "written off".
+    * **permanently impossible** (payment too old, uncaptured, wrong amount) —
+      marked ``failed`` with the reason, because no retry will ever fix it. Pay
+      the student back out of band.
+    * **network / unknown** — stays ``requested`` with no gateway id. The retry
+      command asks Razorpay what actually happened before trying again, so a
+      timed-out-but-successful call is never refunded twice.
+    """
+    payment = refund.payment
+    if not payment.gateway_payment_id or not gateway.is_configured():
+        return refund
+
+    try:
+        remote = gateway.refund_payment(
+            payment.gateway_payment_id,
+            refund.amount,
+            notes={"order_id": str(payment.order_id), "reason": refund.reason},
         )
-        refunded.append(refund)
-    return refunded
+    except gateway.RefundNotPossible as exc:
+        # "Fully refunded already" is a success in disguise — the money is back.
+        if "refunded" in str(exc).lower():
+            return _mark_refund_processed(refund, {"detail": str(exc)})
+        return _mark_refund_failed(refund, str(exc))
+    except gateway.InsufficientBalance as exc:
+        return _hold_refund(refund, str(exc), "insufficient_balance")
+    except (gateway.GatewayError, gateway.GatewayNotConfigured) as exc:
+        return _hold_refund(refund, str(exc), "unknown")
+
+    refund.gateway_refund_id = remote.get("id") or ""
+    refund.raw = remote
+    if remote.get("status") == "processed":
+        return _mark_refund_processed(refund, remote)
+    refund.save(update_fields=["gateway_refund_id", "raw", "updated_at"])
+    return refund
+
+
+def _mark_refund_processed(refund, remote):
+    refund.status = Refund.Status.PROCESSED
+    refund.processed_at = timezone.now()
+    refund.raw = remote if isinstance(remote, dict) else {"detail": str(remote)}
+    if isinstance(remote, dict) and remote.get("id"):
+        refund.gateway_refund_id = remote["id"]
+    refund.save(
+        update_fields=[
+            "status", "processed_at", "raw", "gateway_refund_id", "updated_at"
+        ]
+    )
+    order = refund.payment.order
+    if order.status != Order.Status.REFUNDED:
+        order.status = Order.Status.REFUNDED
+        order.save(update_fields=["status", "updated_at"])
+    Invoice.objects.filter(order=order).update(status=Invoice.Status.REFUNDED)
+    return refund
+
+
+def _mark_refund_failed(refund, message):
+    refund.status = Refund.Status.FAILED
+    refund.raw = {"error": message, "outcome": "permanent"}
+    refund.save(update_fields=["status", "raw", "updated_at"])
+    logger.error(
+        "Refund %s permanently rejected (payment=%s): %s",
+        refund.pk, refund.payment.gateway_payment_id, message,
+    )
+    return refund
+
+
+def _hold_refund(refund, message, outcome):
+    """Keep the debt open and retryable, and say loudly that it needs a human."""
+    refund.raw = {"error": message, "outcome": outcome}
+    refund.save(update_fields=["raw", "updated_at"])
+    logger.error(
+        "Refund %s not sent (%s, payment=%s): %s — money still owed",
+        refund.pk, outcome, refund.payment.gateway_payment_id, message,
+    )
+    return refund
+
+
+def retry_refund(refund):
+    """Re-attempt a recorded-but-unsent refund, without ever double-paying.
+
+    Asks Razorpay for the payment's existing refunds first: a call that timed
+    out may well have succeeded, and re-sending on that assumption is how you
+    refund a student twice.
+    """
+    if refund.status != Refund.Status.REQUESTED or refund.is_sent:
+        return refund
+    payment = refund.payment
+    if not payment.gateway_payment_id or not gateway.is_configured():
+        return refund
+    try:
+        existing = gateway.fetch_refunds(payment.gateway_payment_id)
+    except (gateway.GatewayError, gateway.GatewayNotConfigured) as exc:
+        return _hold_refund(refund, str(exc), "unknown")
+    if existing:
+        # Something is already out there — adopt it rather than making another.
+        remote = existing[0]
+        if remote.get("status") == "failed":
+            return _mark_refund_failed(refund, "Gateway refund failed.")
+        if remote.get("status") == "processed":
+            return _mark_refund_processed(refund, remote)
+        refund.gateway_refund_id = remote.get("id") or ""
+        refund.raw = remote
+        refund.save(update_fields=["gateway_refund_id", "raw", "updated_at"])
+        return refund
+    return send_refund(refund)
 
 
 def _activate_subscription(order, plan_id):

@@ -302,15 +302,27 @@ class Refund(TimeStampedModel):
     payment = models.ForeignKey(
         Payment, on_delete=models.CASCADE, related_name="refunds"
     )
+    # Razorpay's own handle (``rfnd_xxx``). Indexed because the refund webhook
+    # arrives with only this id and has to find our row. Empty means the gateway
+    # was never successfully called — the obligation is recorded but unsent.
+    gateway_refund_id = models.CharField(max_length=255, blank=True, db_index=True)
     amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     reason = models.CharField(max_length=255, blank=True)
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.REQUESTED
     )
     processed_at = models.DateTimeField(null=True, blank=True)
+    # Gateway response, or the error text when a call failed. This is what an
+    # admin reads to decide whether to retry or settle by hand.
+    raw = models.JSONField(default=dict, blank=True)
 
     def __str__(self):
         return f"Refund {self.amount} [{self.status}]"
+
+    @property
+    def is_sent(self):
+        """The gateway accepted it; only the webhook can settle it now."""
+        return bool(self.gateway_refund_id)
 
 
 class TrainerPayout(TimeStampedModel):
