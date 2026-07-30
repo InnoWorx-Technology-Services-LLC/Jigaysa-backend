@@ -27,5 +27,6 @@ router.register(
     views.IndividualBookingViewSet,
     basename="individual-booking",
 )
+router.register("mentors", views.MentorViewSet, basename="mentor")
 
 urlpatterns = router.urls

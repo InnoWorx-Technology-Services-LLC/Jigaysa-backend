@@ -85,6 +85,9 @@ class TrainerProfile(TimeStampedModel):
     )
     expertise = models.CharField(max_length=255, blank=True)
     years_experience = models.PositiveIntegerField(default=0)
+    hourly_rate = models.DecimalField(  # 1:1 pay-per-hour rate (PRD §3.6)
+        max_digits=10, decimal_places=2, default=0
+    )
     rating_avg = models.DecimalField(max_digits=3, decimal_places=2, default=0)
     rating_count = models.PositiveIntegerField(default=0)
     is_approved = models.BooleanField(default=False)  # admin onboarding gate

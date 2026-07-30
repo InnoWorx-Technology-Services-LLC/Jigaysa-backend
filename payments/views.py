@@ -109,7 +109,11 @@ class CouponViewSet(viewsets.ModelViewSet):
     def validate(self, request):
         payload = CouponValidateSerializer(data=request.data)
         payload.is_valid(raise_exception=True)
-        q = services.quote(payload.validated_data["items"], payload.validated_data["code"])
+        q = services.quote(
+            payload.validated_data["items"],
+            payload.validated_data["code"],
+            user=request.user,
+        )
         return Response(
             {
                 "code": q["coupon"].code,
@@ -260,7 +264,12 @@ class OrderViewSet(
                 signature=data["razorpay_signature"],
             )
         except gateway.SignatureMismatch:
-            services.mark_failed(order, data["razorpay_order_id"])
+            # Deliberately does NOT mark the payment failed: a bad signature
+            # means this *request* was garbage, not that the payment failed.
+            # Burning the row here would make the next checkout/ mint a second
+            # gateway order, and a real in-flight payment could then be paid
+            # twice against one fulfilment. Only the payment.failed webhook is
+            # authoritative about failure.
             return Response(
                 {"detail": "Payment signature verification failed."},
                 status=status.HTTP_400_BAD_REQUEST,

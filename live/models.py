@@ -6,8 +6,11 @@ layer; persisted doubts are kept so they can later feed the smart-classroom
 module.
 """
 
+from datetime import timedelta
+
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 from core.models import TimeStampedModel
 
@@ -156,9 +159,15 @@ class IndividualBooking(TimeStampedModel):
 
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"
+        AWAITING_PAYMENT = "awaiting_payment", "Awaiting payment"
         CONFIRMED = "confirmed", "Confirmed"
         COMPLETED = "completed", "Completed"
         CANCELLED = "cancelled", "Cancelled"
+
+    # Hours the student gets to pay after the trainer accepts, and how close to
+    # the session the payment window may still be open.
+    PAYMENT_WINDOW_HOURS = 24
+    PAYMENT_CUTOFF_HOURS_BEFORE_START = 2
 
     trainer = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -170,6 +179,8 @@ class IndividualBooking(TimeStampedModel):
         on_delete=models.CASCADE,
         related_name="bookings_made",
     )
+    topic = models.CharField(max_length=255, blank=True)
+    notes = models.TextField(blank=True)
     start = models.DateTimeField(null=True, blank=True)
     duration_minutes = models.PositiveIntegerField(default=60)
     status = models.CharField(
@@ -189,6 +200,29 @@ class IndividualBooking(TimeStampedModel):
 
     def __str__(self):
         return f"{self.student} ↔ {self.trainer} [{self.status}]"
+
+    @property
+    def payment_due_at(self):
+        """When an unpaid confirmation lapses, or ``None`` if nothing is owed.
+
+        Derived rather than stored: the order is created the moment the trainer
+        accepts, so ``order.created_at`` *is* the acceptance time. A second
+        column would only be a copy of it that could drift.
+        """
+        if self.status != self.Status.AWAITING_PAYMENT or self.order_id is None:
+            return None
+        deadline = self.order.created_at + timedelta(hours=self.PAYMENT_WINDOW_HOURS)
+        if self.start:
+            cutoff = self.start - timedelta(
+                hours=self.PAYMENT_CUTOFF_HOURS_BEFORE_START
+            )
+            deadline = min(deadline, cutoff)
+        return deadline
+
+    @property
+    def payment_expired(self):
+        due = self.payment_due_at
+        return due is not None and timezone.now() > due
 
 
 class SessionDoubt(TimeStampedModel):

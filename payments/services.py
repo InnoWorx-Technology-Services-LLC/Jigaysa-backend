@@ -34,6 +34,7 @@ from payments.models import (
     OrderItem,
     Payment,
     PricingPlan,
+    Refund,
     Subscription,
 )
 
@@ -51,9 +52,44 @@ def money(value) -> Decimal:
     return Decimal(value).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def resolve_line_item(item_type, object_id):
+def session_amount(booking):
+    """Price a 1:1 booking: the trainer's hourly rate × booked hours (PRD §3.6
+    "payment per hour"). Read at order-creation time and snapshotted into the
+    ``OrderItem``, so a later rate change cannot move a quoted price."""
+    profile = getattr(booking.trainer, "trainer_profile", None)
+    rate = Decimal(profile.hourly_rate) if profile else Decimal("0")
+    return money(rate * Decimal(booking.duration_minutes) / Decimal("60"))
+
+
+def resolve_line_item(item_type, object_id, user=None):
     """Resolve a requested line item to (title, amount, ref). Amount is taken
-    from the server-side price, never the client."""
+    from the server-side price, never the client.
+
+    ``user`` is the buyer. It is optional for catalog items (a course costs the
+    same for everyone) but **required** for a session, which is priced from —
+    and payable only by — one specific booking's owner.
+    """
+    if item_type == OrderItem.ItemType.SESSION:
+        from live.models import IndividualBooking  # lazy: avoid app-load cycle
+
+        booking = IndividualBooking.objects.filter(pk=object_id).select_related(
+            "trainer__trainer_profile"
+        ).first()
+        if booking is None:
+            raise ValidationError(f"Booking {object_id} not found.")
+        if user is None or booking.student_id != user.id:
+            raise ValidationError("You can only pay for your own booking.")
+        if booking.status != IndividualBooking.Status.AWAITING_PAYMENT:
+            raise ValidationError(
+                "This booking is not awaiting payment."
+            )
+        amount = session_amount(booking)
+        if amount <= 0:
+            raise ValidationError("This booking has nothing to pay.")
+        title = f"1:1 with {booking.trainer.full_name or booking.trainer.email}"
+        if booking.topic:
+            title = f"{title} — {booking.topic}"
+        return title[:255], amount, booking
     if item_type == OrderItem.ItemType.COURSE:
         course = Course.objects.filter(pk=object_id).first()
         if course is None:
@@ -113,7 +149,7 @@ def coupon_discount(coupon, subtotal) -> Decimal:
     return money(min(subtotal, coupon.value))
 
 
-def quote(items, coupon_code=None):
+def quote(items, coupon_code=None, user=None):
     """Price a cart without persisting: returns the resolved items + totals."""
     if not items:
         raise ValidationError("An order needs at least one item.")
@@ -121,7 +157,9 @@ def quote(items, coupon_code=None):
     subtotal = Decimal("0")
     item_types = set()
     for item in items:
-        title, amount, ref = resolve_line_item(item["item_type"], item["object_id"])
+        title, amount, ref = resolve_line_item(
+            item["item_type"], item["object_id"], user=user
+        )
         resolved.append(
             {"item_type": item["item_type"], "object_id": item["object_id"],
              "title": title, "amount": amount, "ref": ref}
@@ -150,7 +188,7 @@ def quote(items, coupon_code=None):
 
 @transaction.atomic
 def create_order(user, items, coupon_code=None):
-    q = quote(items, coupon_code)
+    q = quote(items, coupon_code, user=user)
     order = Order.objects.create(
         user=user,
         status=Order.Status.PENDING,
@@ -404,6 +442,52 @@ def _fulfil_order(order):
                 )
         elif item.item_type == OrderItem.ItemType.PLAN:
             _activate_subscription(order, item.object_id)
+        elif item.item_type == OrderItem.ItemType.SESSION:
+            _confirm_paid_booking(order, item.object_id)
+
+
+def _confirm_paid_booking(order, booking_id):
+    """Money arrived for a 1:1 booking — confirm it, or owe it back.
+
+    The booking can legitimately no longer be payable by the time this runs: the
+    student may have paid a stale order after the payment window closed and the
+    slot was released. Confirming then would hand out a slot the trainer has
+    already re-sold, so we record the money as owed instead of silently keeping
+    it.
+    """
+    from live.models import IndividualBooking  # lazy: avoid app-load cycle
+
+    booking = IndividualBooking.objects.filter(
+        pk=booking_id, student=order.user
+    ).first()
+    if booking is None:
+        return
+    if booking.status == IndividualBooking.Status.AWAITING_PAYMENT:
+        booking.status = IndividualBooking.Status.CONFIRMED
+        booking.order = order
+        booking.save(update_fields=["status", "order", "updated_at"])
+    else:
+        request_refund(order, reason=f"Booking #{booking.pk} was no longer payable.")
+
+
+def request_refund(order, reason=""):
+    """Record money owed back to the buyer, without moving it.
+
+    Deliberately does **not** call the gateway: refunds are settled by an admin
+    for now (PRD §3.13 refunds is unbuilt). The row is the obligation — an
+    unpaid ``Refund`` is a debt the platform can be held to, which is the point.
+    The order stays ``paid`` because the money has not actually come back yet.
+    Idempotent: one open refund per payment.
+    """
+    refunded = []
+    for payment in order.payments.filter(status=Payment.Status.SUCCESS):
+        refund, _ = Refund.objects.get_or_create(
+            payment=payment,
+            status=Refund.Status.REQUESTED,
+            defaults={"amount": payment.amount, "reason": reason[:255]},
+        )
+        refunded.append(refund)
+    return refunded
 
 
 def _activate_subscription(order, plan_id):

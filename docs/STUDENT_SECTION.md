@@ -40,8 +40,12 @@ certificate, with notifications and gamification firing along the way.
 - `GET  /live-sessions/{id}/doubts/` — student sees own; trainer sees all.
 - `GET  /session-registrations/` + `POST /{id}/cancel/` — cancel frees the seat
   and **promotes the next waitlisted student**.
+- `GET  /mentors/?q=` — bookable (approved) trainers with `hourly_rate`.
 - `GET  /trainer-availability/?trainer=&available=true` — open 1:1 slots.
-- `POST /individual-bookings/` — book a 1:1 slot (marks the slot booked).
+- `POST /individual-bookings/` — book a 1:1 slot with a required `topic` and
+  optional `notes` (locks + marks the slot booked; notifies the trainer).
+- `POST /individual-bookings/{id}/` `cancel|confirm|decline|complete` — the 1:1
+  lifecycle; `cancel`/`decline` **free the slot** and notify the other party.
 
 ### 2.3 Assessments & Assignments (PRD §3.12) — `/api/v1/`
 - `GET  /assessments/?course=` and `GET /assessments/{id}/` — questions & choices
@@ -127,9 +131,13 @@ u
 
 ## 4. Still pending in Payments (for later)
 
-Real gateway integration (Razorpay/UPI recommended first) + webhook verification,
-refunds endpoint, EMI/installments, pay-per-session & 1:1 booking checkout,
+Refunds **execution** (obligations are recorded as `Refund` rows, but nothing
+calls the gateway — an admin settles them by hand), EMI/installments,
 corporate/group pricing, referral credits, and trainer revenue-share payouts.
+
+Done since this list was written: Razorpay integration + webhook verification,
+and 1:1 booking checkout (PRD §3.6 payment per hour) — see
+[STUDENT_1TO1_BOOKING_API.md](STUDENT_1TO1_BOOKING_API.md).
 
 ---
 

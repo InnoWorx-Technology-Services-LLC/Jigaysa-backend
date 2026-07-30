@@ -69,6 +69,27 @@ def on_submission(sender, instance, created, **kwargs):
 
 @receiver(
     post_save,
+    sender="live.IndividualBooking",
+    dispatch_uid="notify_individual_booking",
+)
+def on_individual_booking(sender, instance, created, **kwargs):
+    # Only the request itself; confirm/decline/cancel notify from the view,
+    # where the transition that fired them is known.
+    if not created:
+        return
+    student = instance.student
+    notify(
+        instance.trainer,
+        NotificationCategory.LIVE_CLASS,
+        title="New 1:1 booking request",
+        body=f"{student.full_name or student.email} requested "
+        f"“{instance.topic or 'a session'}”.",
+        link="/trainer/sessions",
+    )
+
+
+@receiver(
+    post_save,
     sender="live.SessionRegistration",
     dispatch_uid="notify_session_registration",
 )

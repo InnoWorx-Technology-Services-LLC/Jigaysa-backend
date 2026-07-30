@@ -219,6 +219,31 @@ def test_verify_rejects_forged_signature(live_keys, student, paid_course, monkey
     assert fetch.call_count == 0  # bails before asking Razorpay anything
     assert Order.objects.get(pk=order["id"]).status == Order.Status.PENDING
     assert not Enrollment.objects.filter(student=student, course=paid_course).exists()
+    # A junk request must not burn the gateway order: the row stays CREATED so
+    # a real in-flight payment can still settle against it.
+    assert Payment.objects.get(order_id=order["id"]).status == Payment.Status.CREATED
+
+
+def test_bad_signature_does_not_mint_a_second_gateway_order(
+    live_keys, student, paid_course, monkeypatch
+):
+    """Regression: probing verify/ with junk used to orphan the gateway order,
+    so the next checkout/ created a second one — two payable orders for one
+    cart, which can take the student's money twice."""
+    api = _api(student)
+    order = _make_order(api, paid_course)
+    create = _patch_create_order(monkeypatch)
+    api.post(f"/api/v1/orders/{order['id']}/checkout/", {}, format="json")
+
+    api.post(
+        f"/api/v1/orders/{order['id']}/verify/",
+        _verify_body(signature="deadbeef"),
+        format="json",
+    )
+    api.post(f"/api/v1/orders/{order['id']}/checkout/", {}, format="json")
+
+    assert create.call_count == 1
+    assert Payment.objects.filter(order_id=order["id"]).count() == 1
 
 
 def test_verify_rejects_amount_mismatch(live_keys, student, paid_course, monkeypatch):

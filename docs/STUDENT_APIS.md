@@ -481,22 +481,71 @@ waitlisted student** to `registered`.
 
 ### 7.6 1:1 booking
 
-- `GET /trainer-availability/?trainer=<id>&available=true` — open future slots.
-  `available=true` filters `is_booked=false` **and** `start >= now`.
-  → `{ id, trainer: {…}, start, end, slot_minutes, is_booked }`
-- `POST /individual-bookings/` — `{ "trainer": 5, "start": "2026-08-02T11:00:00Z", "duration_minutes": 60 }`
+> **Full frontend guide: [STUDENT_1TO1_BOOKING_API.md](STUDENT_1TO1_BOOKING_API.md)**
+> — statuses, payment, deadlines and UI labels. Summary below.
 
-  **`201`** → `{ id, trainer, trainer_name, student, student_name, start,
-  duration_minutes, status: "pending", meeting_url: "", created_at }`
+The three steps of the **Book a session** modal, in order.
 
-  The matching availability slot is marked booked. **`400`** cases:
-  `You cannot book a session with yourself.` ·
-  `No open availability for this trainer at that time.`
-  Omitting `start` skips the slot check entirely and books nothing on the calendar.
+**Step 1 — choose a mentor.** `GET /mentors/?q=<search>` — approved, active
+trainers only; `q` matches name or expertise.
+
+```json
+{ "id": 5, "full_name": "Dr. Kapoor", "email": "…",
+  "headline": "Senior data scientist", "avatar": "",
+  "expertise": "React", "years_experience": 8,
+  "hourly_rate": "1500.00", "rating_avg": "4.80", "rating_count": 32 }
+```
+
+**Step 2 — pick a slot.** `GET /trainer-availability/?trainer=<id>&available=true`
+— open future slots. `available=true` filters `is_booked=false` **and**
+`start >= now`. → `{ id, trainer: {…}, start, end, slot_minutes, is_booked }`
+
+> Each bookable time is **its own row**. `start` in the booking must equal a
+> slot's `start` exactly — don't split one long slot into hours client-side.
+
+**Step 3 — submit.** `POST /individual-bookings/`
+
+```json
+{ "trainer": 5, "start": "2026-08-02T11:00:00Z", "duration_minutes": 60,
+  "topic": "React hooks deep dive", "notes": "Tried useMemo already." }
+```
+
+**`201`** → `{ id, trainer, trainer_name, student, student_name, topic, notes,
+start, duration_minutes, status: "pending", meeting_url: "", created_at }`
+
+`topic` is **required**; `notes` is optional. The matching availability slot is
+locked (`SELECT … FOR UPDATE`) and marked booked, so two students racing for the
+same slot can't both win. **`400`** cases: `You cannot book a session with
+yourself.` · `No open availability for this trainer at that time.`
+Omitting `start` skips the slot check entirely and books nothing on the calendar.
+The trainer gets a "New 1:1 booking request" notification.
+
+**Lifecycle.** `pending` → `awaiting_payment` → `confirmed` → `completed`;
+`cancel` from either side while still open. All return the updated booking; all
+`400` with `This booking is already <status>.` on an invalid transition.
+
+| Endpoint | Who | Effect |
+|---|---|---|
+| `POST /individual-bookings/{id}/cancel/` | student **or** trainer | → `cancelled`, **frees the slot**, notifies the other party. Adds `refund_requested` / `paid` to the response |
+| `POST /individual-bookings/{id}/confirm/` | trainer | → `awaiting_payment` + creates the order (or `confirmed` when the mentor is free). Optional body `{ "meeting_url": "https://…" }` |
+| `POST /individual-bookings/{id}/decline/` | trainer | → `cancelled`, **frees the slot**, notifies the student |
+| `POST /individual-bookings/{id}/complete/` | trainer | `confirmed` → `completed` (moves it to "Past sessions") |
+
 - `GET /individual-bookings/` — bookings you made (or, for trainers, received).
+  Render `pending` as **requested**; derive Upcoming / Completed / Total-hours
+  counters client-side from `status` + `duration_minutes`.
 
-> `meeting_url` on a booking is **always empty** — nothing in the codebase writes
-> it. See §14.
+**Payment (PRD §3.6 payment per hour).** Accepting a request prices it at the
+mentor's `hourly_rate × duration` (+18% GST) and mints an order, exposed on the
+booking as `order` / `amount_due` / `payment_due_at` / `is_paid`. Pay it through
+the normal `POST /orders/{id}/checkout/` → `verify/` flow (§13); the booking
+flips to `confirmed` on settlement. Miss `payment_due_at` (24h after acceptance,
+or 2h before start — whichever is sooner) and the booking is cancelled and the
+slot released.
+
+> `meeting_url` is written **only** by `confirm/`. It stays empty otherwise.
+> A trainer cancelling a **paid** booking records a refund obligation; nothing
+> calls Razorpay's refund API. See §15.
 
 ---
 
