@@ -29,6 +29,11 @@ def issue_for_enrollment(enrollment, *, force=False):
     if not force and enrollment.status != Enrollment.Status.COMPLETED:
         return None, False
 
+    # The trainer's "Certificate of completion" toggle. ``force`` still wins so
+    # an admin can issue one by hand for a course that has it switched off.
+    if not force and not enrollment.course.certificate_enabled:
+        return None, False
+
     existing = Certificate.objects.filter(
         student=enrollment.student,
         course=enrollment.course,

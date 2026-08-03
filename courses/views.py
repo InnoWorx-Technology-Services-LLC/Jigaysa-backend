@@ -15,6 +15,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from core.permissions import IsAdmin
+from payments import entitlements
 from courses.models import (
     Batch,
     Category,
@@ -22,12 +23,14 @@ from courses.models import (
     CourseReview,
     Enrollment,
     Lesson,
+    LessonNote,
     LessonProgress,
     LessonResource,
     Module,
     Tag,
 )
-from courses.permissions import IsTrainerOwnerOrReadOnly
+from courses import review
+from courses.permissions import IsTrainerOwnerOrReadOnly, course_of
 from courses.serializers import (
     BatchSerializer,
     CategorySerializer,
@@ -37,6 +40,7 @@ from courses.serializers import (
     CourseWriteSerializer,
     EnrollmentCreateSerializer,
     EnrollmentSerializer,
+    LessonNoteSerializer,
     LessonProgressSerializer,
     LessonResourceSerializer,
     LessonSerializer,
@@ -130,6 +134,9 @@ class CourseViewSet(viewsets.ModelViewSet):
     api_roles_by_action = {
         **_AUTHORING_BY_ACTION,
         "publish": TRAINER_WRITE,
+        "reject": ("admin",),
+        "review_queue": ("admin",),
+        "archive": TRAINER_WRITE,
         "enroll": ("student",),
     }
 
@@ -207,16 +214,75 @@ class CourseViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def publish(self, request, slug=None):
-        """Submit a course for review (trainer) or publish it (admin)."""
+        """Submit for review (trainer) or approve and publish (admin).
+
+        A trainer may only submit a course that has a curriculum, and may not
+        re-submit one that is already live — that used to silently pull the
+        course out of the catalog and take enrolled students' access with it.
+        """
         course = self.get_object()
         self.check_object_permissions(request, course)
         if _is_admin(request.user):
-            course.status = Course.Status.PUBLISHED
-            course.published_at = course.published_at or timezone.now()
+            review.approve(course, note=(request.data.get("note") or "").strip())
         else:
-            course.status = Course.Status.PENDING_REVIEW
-        course.save(update_fields=["status", "published_at", "updated_at"])
+            review.submit_for_review(course)
         return Response(CourseDetailSerializer(course).data)
+
+    @action(detail=True, methods=["post"])
+    def reject(self, request, slug=None):
+        """Admin sends a submitted course back to the trainer with a reason."""
+        if not _is_admin(request.user):
+            raise PermissionDenied("Only an admin can reject a course.")
+        course = self.get_object()
+        note = (request.data.get("note") or "").strip()
+        if not note:
+            raise ValidationError(
+                {"note": "Tell the trainer what needs changing."}
+            )
+        review.reject(course, note=note)
+        return Response(CourseDetailSerializer(course).data)
+
+    @action(detail=True, methods=["post"])
+    def archive(self, request, slug=None):
+        """Retire a course: it leaves the catalog, enrolled students keep it.
+
+        Archiving rather than deleting keeps enrollments, progress, certificates
+        and the order history intact — deleting a sold course would tear out
+        rows people paid for.
+        """
+        course = self.get_object()
+        self.check_object_permissions(request, course)
+        course.status = Course.Status.ARCHIVED
+        course.save(update_fields=["status", "updated_at"])
+        return Response(CourseDetailSerializer(course).data)
+
+    @action(detail=False, methods=["get"], url_path="review-queue")
+    def review_queue(self, request):
+        """Admin queue: everything waiting on a decision.
+
+        Both things an admin acts on in one call — fresh submissions, and live
+        courses whose curriculum changed after approval.
+        """
+        if not _is_admin(request.user):
+            raise PermissionDenied("Only an admin can see the review queue.")
+        pending = Course.objects.filter(
+            Q(status=Course.Status.PENDING_REVIEW)
+            | Q(status=Course.Status.PUBLISHED, has_unapproved_changes=True)
+        ).select_related("trainer", "category")
+        return Response(
+            {
+                "pending_review": CourseListSerializer(
+                    pending.filter(status=Course.Status.PENDING_REVIEW),
+                    many=True,
+                    context={"request": request},
+                ).data,
+                "changed_after_approval": CourseListSerializer(
+                    pending.filter(has_unapproved_changes=True),
+                    many=True,
+                    context={"request": request},
+                ).data,
+            }
+        )
 
     @action(detail=True, methods=["get"])
     def curriculum(self, request, slug=None):
@@ -225,11 +291,7 @@ class CourseViewSet(viewsets.ModelViewSet):
         course = self.get_object()
         user = request.user
         enrollment = Enrollment.objects.filter(student=user, course=course).first()
-        has_access = (
-            _is_admin(user)
-            or course.trainer_id == user.id
-            or enrollment is not None
-        )
+        has_access = _has_course_access(user, course, enrollment)
 
         # Fold the student's per-lesson progress in so the player renders the
         # completion ticks / resume point from this single call.
@@ -276,18 +338,40 @@ class CourseViewSet(viewsets.ModelViewSet):
             student=request.user,
             course=course,
             batch=serializer.validated_data.get("batch"),
+            source=serializer.enrollment_source(course),
         )
         return Response(
             EnrollmentSerializer(enrollment).data, status=status.HTTP_201_CREATED
         )
 
 
-def _create_enrollment(student, course, batch=None):
+def _has_course_access(user, course, enrollment):
+    """Whether ``user`` may open ``course``'s gated content.
+
+    Access comes from being staff, owning the course, having bought or been
+    granted an enrollment, or holding a plan that includes all paid courses.
+
+    The subtle case is a **lapsed subscriber**: their subscription-sourced
+    enrollment row still exists, so checking "is there an enrollment?" alone
+    would keep the content unlocked forever after they stop paying. Those
+    enrollments only count while the entitlement is still live; a purchased or
+    free enrollment is theirs to keep either way.
+    """
+    if _is_admin(user) or course.trainer_id == user.id:
+        return True
+    if entitlements.can_access_paid_courses(user):
+        return True
+    if enrollment is None:
+        return False
+    return enrollment.source != Enrollment.Source.SUBSCRIPTION
+
+
+def _create_enrollment(student, course, batch=None, source=None):
     enrollment = Enrollment.objects.create(
         student=student,
         course=course,
         batch=batch,
-        source=Enrollment.Source.FREE,
+        source=source or Enrollment.Source.FREE,
         status=Enrollment.Status.ACTIVE,
     )
     Course.objects.filter(pk=course.pk).update(
@@ -305,7 +389,31 @@ def _create_enrollment(student, course, batch=None):
 # --------------------------------------------------------------------------- #
 
 
-class ModuleViewSet(viewsets.ModelViewSet):
+class CurriculumChangeMixin:
+    """Flag the owning course for re-review whenever its structure changes.
+
+    Applied to every authoring viewset below the course itself, so an admin
+    cannot approve a curriculum and then have it quietly rewritten underneath
+    them. The course stays published throughout — see ``courses.review``.
+    """
+
+    def _flag(self, obj):
+        course = course_of(obj)
+        if course is not None:
+            review.flag_curriculum_change(course)
+
+    def perform_update(self, serializer):
+        serializer.save()
+        self._flag(serializer.instance)
+
+    def perform_destroy(self, instance):
+        course = course_of(instance)
+        instance.delete()
+        if course is not None:
+            review.flag_curriculum_change(course)
+
+
+class ModuleViewSet(CurriculumChangeMixin, viewsets.ModelViewSet):
     """Modules within a course. Filter by ``?course=<id>``."""
 
     serializer_class = ModuleSerializer
@@ -322,9 +430,10 @@ class ModuleViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         _assert_can_author(self.request.user, serializer.validated_data["course"])
         serializer.save()
+        self._flag(serializer.instance)
 
 
-class LessonViewSet(viewsets.ModelViewSet):
+class LessonViewSet(CurriculumChangeMixin, viewsets.ModelViewSet):
     """Lessons within a module. Filter by ``?module=<id>``."""
 
     serializer_class = LessonSerializer
@@ -342,9 +451,10 @@ class LessonViewSet(viewsets.ModelViewSet):
         module = serializer.validated_data["module"]
         _assert_can_author(self.request.user, module.course)
         serializer.save()
+        self._flag(serializer.instance)
 
 
-class LessonResourceViewSet(viewsets.ModelViewSet):
+class LessonResourceViewSet(CurriculumChangeMixin, viewsets.ModelViewSet):
     """Downloadable/linked resources on a lesson. Filter by ``?lesson=<id>``."""
 
     serializer_class = LessonResourceSerializer
@@ -420,14 +530,51 @@ class EnrollmentViewSet(
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        course = serializer.validated_data["course"]
         enrollment = _create_enrollment(
             student=request.user,
-            course=serializer.validated_data["course"],
+            course=course,
             batch=serializer.validated_data.get("batch"),
+            source=serializer.enrollment_source(course),
         )
         return Response(
             EnrollmentSerializer(enrollment).data, status=status.HTTP_201_CREATED
         )
+
+
+class LessonNoteViewSet(viewsets.ModelViewSet):
+    """The player's Notes tab. Filter by ``?lesson=<id>``.
+
+    POST upserts, so the tab can just save whatever is in the textarea without
+    first checking whether a note already exists. Notes are private to the
+    student — the queryset never widens, not even for an admin.
+    """
+
+    serializer_class = LessonNoteSerializer
+    permission_classes = [IsAuthenticated]
+    api_roles = ("student", "trainer", "admin")
+
+    def get_queryset(self):
+        qs = LessonNote.objects.filter(student=self.request.user).select_related(
+            "lesson"
+        )
+        return _filter_by(qs, self.request, "lesson", "lesson_id")
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        note, created = LessonNote.objects.update_or_create(
+            student=request.user,
+            lesson=serializer.validated_data["lesson"],
+            defaults={"body": serializer.validated_data.get("body", "")},
+        )
+        return Response(
+            self.get_serializer(note).data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+    def perform_update(self, serializer):
+        serializer.save(student=self.request.user)
 
 
 class LessonProgressViewSet(viewsets.ModelViewSet):

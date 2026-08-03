@@ -8,6 +8,7 @@ dedicated write serializer keeps trainer-controlled fields server-side.
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
+from payments import entitlements
 from courses.models import (
     Batch,
     Category,
@@ -15,6 +16,7 @@ from courses.models import (
     CourseReview,
     Enrollment,
     Lesson,
+    LessonNote,
     LessonProgress,
     LessonResource,
     Module,
@@ -197,8 +199,10 @@ class CourseListSerializer(serializers.ModelSerializer):
             "language",
             "duration_minutes",
             "thumbnail",
+            "thumbnail_color",
             "is_free",
             "status",
+            "has_unapproved_changes",
             "rating_avg",
             "rating_count",
             "enrolled_count",
@@ -233,9 +237,16 @@ class CourseDetailSerializer(serializers.ModelSerializer):
             "language",
             "duration_minutes",
             "thumbnail",
+            "thumbnail_color",
             "intro_video_url",
+            "outcomes",
+            "welcome_message",
+            "completion_message",
+            "certificate_enabled",
             "prerequisites",
             "status",
+            "has_unapproved_changes",
+            "review_note",
             "visibility",
             "is_free",
             "rating_avg",
@@ -274,7 +285,12 @@ class CourseWriteSerializer(serializers.ModelSerializer):
             "language",
             "duration_minutes",
             "thumbnail",
+            "thumbnail_color",
             "intro_video_url",
+            "outcomes",
+            "welcome_message",
+            "completion_message",
+            "certificate_enabled",
             "prerequisites",
             "visibility",
             "is_free",
@@ -334,8 +350,12 @@ class EnrollmentSerializer(serializers.ModelSerializer):
 
 
 class EnrollmentCreateSerializer(serializers.Serializer):
-    """Self-enroll into a course. Paid courses require the payments module
-    (pending) — only free courses can be enrolled directly for now."""
+    """Self-enroll into a course.
+
+    Free courses are open to anyone. A paid course needs either a purchase or a
+    plan that includes all paid courses (PRD §3.4) — the subscriber's enrollment
+    is tagged ``subscription`` so access can lapse with the plan.
+    """
 
     course = serializers.PrimaryKeyRelatedField(queryset=Course.objects.all())
     batch = serializers.PrimaryKeyRelatedField(
@@ -348,12 +368,28 @@ class EnrollmentCreateSerializer(serializers.Serializer):
         user = self.context["request"].user
         if Enrollment.objects.filter(student=user, course=course).exists():
             raise serializers.ValidationError("Already enrolled in this course.")
-        if not course.is_free:
+        if not course.is_free and not entitlements.can_access_paid_courses(user):
             raise serializers.ValidationError(
-                "This is a paid course. Purchase it via checkout "
-                "(POST /api/v1/orders/ then /orders/{id}/pay/) to enrol."
+                "This is a paid course. Buy it via checkout "
+                "(POST /api/v1/orders/ then /orders/{id}/pay/), or subscribe to "
+                "a plan that includes all paid courses."
             )
         return course
+
+    def enrollment_source(self, course):
+        """Where the resulting enrollment came from, for the access rules."""
+        if course.is_free:
+            return Enrollment.Source.FREE
+        return Enrollment.Source.SUBSCRIPTION
+
+
+class LessonNoteSerializer(serializers.ModelSerializer):
+    """The player's Notes tab. ``student`` comes from the request, never the body."""
+
+    class Meta:
+        model = LessonNote
+        fields = ("id", "lesson", "body", "created_at", "updated_at")
+        read_only_fields = ("created_at", "updated_at")
 
 
 class LessonProgressSerializer(serializers.ModelSerializer):

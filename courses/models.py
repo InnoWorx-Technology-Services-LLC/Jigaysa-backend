@@ -115,13 +115,28 @@ class Course(TimeStampedModel):
     language = models.CharField(max_length=20, default="en")
     duration_minutes = models.PositiveIntegerField(default=0)
     thumbnail = models.URLField(blank=True)
+    # Fallback cover colour when no image is uploaded — the swatch picker in the
+    # trainer editor, and what the student's course cards render.
+    thumbnail_color = models.CharField(max_length=20, blank=True)
     intro_video_url = models.URLField(blank=True)
+    # "What will students get out of it?" — a list of plain strings so the
+    # editor can add/remove bullets without a row per outcome.
+    outcomes = models.JSONField(default=list, blank=True)
+    welcome_message = models.TextField(blank=True)      # shown on enrollment
+    completion_message = models.TextField(blank=True)   # shown on completion
+    certificate_enabled = models.BooleanField(default=True)
     prerequisites = models.ManyToManyField(
         "self", blank=True, symmetrical=False, related_name="required_for"
     )
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.DRAFT
     )
+    # Set when the curriculum of an already-published course changes. The course
+    # stays live — pulling it offline over a typo fix would punish students —
+    # but admins get a queue of what changed since they approved it.
+    has_unapproved_changes = models.BooleanField(default=False)
+    # The admin's last approve/reject note, shown back to the trainer.
+    review_note = models.TextField(blank=True)
     visibility = models.CharField(
         max_length=20, choices=Visibility.choices, default=Visibility.PUBLIC
     )
@@ -273,6 +288,9 @@ class Enrollment(TimeStampedModel):
         FREE = "free", "Free"
         BULK = "bulk", "Bulk (institution)"
         INSTITUTION = "institution", "Institution"
+        # Granted by a platform plan, not bought outright — access lasts only
+        # as long as the subscription does (PRD §3.4).
+        SUBSCRIPTION = "subscription", "Subscription"
 
     student = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -316,6 +334,36 @@ class Enrollment(TimeStampedModel):
 
     def __str__(self):
         return f"{self.student} → {self.course}"
+
+
+class LessonNote(TimeStampedModel):
+    """A student's private notes on a lesson (course player "Notes" tab).
+
+    One note per student per lesson: the tab is a single free-text pad the
+    student keeps editing, not a feed of separate entries. Private by
+    definition — never exposed to the trainer.
+    """
+
+    student = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="lesson_notes",
+    )
+    lesson = models.ForeignKey(
+        Lesson, on_delete=models.CASCADE, related_name="notes"
+    )
+    body = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["student", "lesson"], name="unique_student_lesson_note"
+            )
+        ]
+
+    def __str__(self):
+        return f"Note by {self.student} on {self.lesson}"
 
 
 class LessonProgress(TimeStampedModel):

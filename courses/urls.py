@@ -24,6 +24,7 @@ router.register("enrollments", views.EnrollmentViewSet, basename="enrollment")
 router.register(
     "lesson-progress", views.LessonProgressViewSet, basename="lesson-progress"
 )
+router.register("lesson-notes", views.LessonNoteViewSet, basename="lesson-note")
 router.register("reviews", views.CourseReviewViewSet, basename="review")
 
 urlpatterns = router.urls

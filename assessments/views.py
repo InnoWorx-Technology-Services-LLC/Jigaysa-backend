@@ -7,6 +7,7 @@ assessments and manually grade the held submissions. Answer keys are never
 exposed to students (see ``ChoiceSerializer``).
 """
 
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import mixins, status, viewsets
@@ -25,6 +26,8 @@ from assessments.serializers import (
     AssessmentDetailSerializer,
     AssessmentSerializer,
     GradeSerializer,
+    QuestionAuthorSerializer,
+    QuestionBulkSerializer,
     SubmissionSerializer,
     SubmitSerializer,
 )
@@ -63,6 +66,7 @@ class AssessmentViewSet(viewsets.ModelViewSet):
         "update": TRAINER_WRITE,
         "partial_update": TRAINER_WRITE,
         "destroy": TRAINER_WRITE,
+        "questions": TRAINER_WRITE,
         "submit": ("student",),
     }
 
@@ -104,6 +108,43 @@ class AssessmentViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         self._assert_owner(instance)
         instance.delete()
+
+    @action(detail=True, methods=["get", "post"], url_path="questions")
+    def questions(self, request, pk=None):
+        """Author the question set — the editor's "Save questions" button.
+
+        ``GET`` returns the questions **with the answer key**, which is why it
+        is trainer-only. ``POST`` replaces the whole set in one call, so the
+        editor never has to reconcile per-question creates, updates and
+        deletes against what the server already had.
+        """
+        assessment = self.get_object()
+        self._assert_owner(assessment)
+
+        if request.method == "GET":
+            return Response(
+                QuestionAuthorSerializer(
+                    assessment.questions.prefetch_related("choices"), many=True
+                ).data
+            )
+
+        payload = QuestionBulkSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        with transaction.atomic():
+            assessment.questions.all().delete()
+            for order, question_data in enumerate(
+                payload.validated_data["questions"]
+            ):
+                question_data.setdefault("order", order)
+                question_data["assessment"] = assessment
+                QuestionAuthorSerializer().create(question_data)
+            assessment.refresh_from_db()
+        return Response(
+            QuestionAuthorSerializer(
+                assessment.questions.prefetch_related("choices"), many=True
+            ).data,
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=True, methods=["post"])
     def submit(self, request, pk=None):

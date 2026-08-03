@@ -28,8 +28,42 @@ class PricingPlan(TimeStampedModel):
     )
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     currency = models.CharField(max_length=8, default=CURRENCY_DEFAULT)
+    # Free-text marketing bullets shown on the pricing card. Display only —
+    # the tick-boxes below are what the backend actually honours.
     features = models.JSONField(default=list, blank=True)
+
+    # --- what a subscriber gets: ticked by an admin, read by the code ------ #
+    includes_all_paid_courses = models.BooleanField(
+        default=False,
+        help_text="Access every paid course without buying them individually.",
+    )
+    includes_live_sessions = models.BooleanField(
+        default=False, help_text="Join live classes and cohorts."
+    )
+    includes_certificates = models.BooleanField(
+        default=False, help_text="Earn completion certificates."
+    )
+    priority_support = models.BooleanField(
+        default=False,
+        help_text="Support promise only — nothing in the API is gated on it.",
+    )
+
     is_active = models.BooleanField(default=True)
+
+    #: Tick-box name → the entitlement key the code checks.
+    ENTITLEMENT_FIELDS = {
+        "all_paid_courses": "includes_all_paid_courses",
+        "live_sessions": "includes_live_sessions",
+        "certificates": "includes_certificates",
+        "priority_support": "priority_support",
+    }
+
+    def entitlements(self) -> dict:
+        """This plan's ticks as a flat ``{key: bool}`` map for the API."""
+        return {
+            key: getattr(self, field)
+            for key, field in self.ENTITLEMENT_FIELDS.items()
+        }
 
     class Meta:
         ordering = ["price"]

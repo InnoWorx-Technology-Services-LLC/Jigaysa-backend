@@ -42,6 +42,125 @@ class QuestionSerializer(serializers.ModelSerializer):
         )
 
 
+class ChoiceAuthorSerializer(serializers.ModelSerializer):
+    """Trainer-facing choice — **includes the answer key**.
+
+    Deliberately separate from ``ChoiceSerializer``: that one is the student
+    shape and must never carry ``is_correct``. Keeping them apart means a
+    student endpoint cannot leak the key by accident.
+    """
+
+    class Meta:
+        model = Choice
+        fields = ("id", "text", "is_correct", "order")
+
+
+class QuestionAuthorSerializer(serializers.ModelSerializer):
+    """Trainer-facing question with writable nested choices.
+
+    The editor posts a question and its options together, so choices are
+    written here rather than through a second endpoint — a half-saved question
+    with no options is not a state worth allowing.
+    """
+
+    choices = ChoiceAuthorSerializer(many=True, required=False)
+
+    class Meta:
+        model = Question
+        fields = (
+            "id",
+            "assessment",
+            "question_type",
+            "text",
+            "points",
+            "order",
+            "meta",
+            "choices",
+        )
+        # Always taken from the URL of the bulk endpoint, never the body — a
+        # payload can't move a question onto someone else's assessment.
+        read_only_fields = ("assessment",)
+
+    def validate(self, attrs):
+        """Objective questions need options and exactly the right number of keys."""
+        question_type = attrs.get(
+            "question_type",
+            getattr(self.instance, "question_type", Question.QuestionType.MCQ),
+        )
+        choices = attrs.get("choices")
+        if choices is None:
+            return attrs  # partial update that leaves the options alone
+
+        objective = question_type in (
+            Question.QuestionType.MCQ,
+            Question.QuestionType.MULTI,
+        )
+        if not objective:
+            return attrs
+        if len(choices) < 2:
+            raise serializers.ValidationError(
+                {"choices": "Give the question at least two options."}
+            )
+        correct = [c for c in choices if c.get("is_correct")]
+        if not correct:
+            raise serializers.ValidationError(
+                {"choices": "Mark which option is correct."}
+            )
+        if question_type == Question.QuestionType.MCQ and len(correct) > 1:
+            raise serializers.ValidationError(
+                {"choices": "A single-answer question can have only one correct option."}
+            )
+        return attrs
+
+    def _write_choices(self, question, choices):
+        """Replace the option set wholesale.
+
+        Simpler and safer than diffing: the editor always submits the full list,
+        and a stale option surviving a rewrite could silently remain a valid
+        answer.
+        """
+        question.choices.all().delete()
+        Choice.objects.bulk_create(
+            [
+                Choice(
+                    question=question,
+                    text=choice.get("text", ""),
+                    is_correct=choice.get("is_correct", False),
+                    order=choice.get("order", index),
+                )
+                for index, choice in enumerate(choices)
+            ]
+        )
+
+    def create(self, validated_data):
+        choices = validated_data.pop("choices", [])
+        question = Question.objects.create(**validated_data)
+        self._write_choices(question, choices)
+        _sync_question_count(question.assessment)
+        return question
+
+    def update(self, instance, validated_data):
+        choices = validated_data.pop("choices", None)
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        instance.save()
+        if choices is not None:
+            self._write_choices(instance, choices)
+        return instance
+
+
+def _sync_question_count(assessment):
+    Assessment.objects.filter(pk=assessment.pk).update(
+        total_questions=assessment.questions.count()
+    )
+
+
+class QuestionBulkSerializer(serializers.Serializer):
+    """Body of ``POST /assessments/{id}/questions/`` — the "Save questions" button."""
+
+    questions = QuestionAuthorSerializer(many=True)
+
+
 class RubricSerializer(serializers.ModelSerializer):
     class Meta:
         model = Rubric

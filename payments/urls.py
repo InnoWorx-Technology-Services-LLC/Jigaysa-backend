@@ -23,5 +23,10 @@ urlpatterns = [
         webhooks.RazorpayWebhookView.as_view(),
         name="razorpay-webhook",
     ),
+    path(
+        "billing/summary/",
+        views.BillingSummaryView.as_view(),
+        name="billing-summary",
+    ),
     *router.urls,
 ]

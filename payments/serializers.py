@@ -16,12 +16,31 @@ from payments.models import (
 
 
 class PricingPlanSerializer(serializers.ModelSerializer):
+    entitlements = serializers.SerializerMethodField()
+
     class Meta:
         model = PricingPlan
         fields = (
             "id", "name", "slug", "billing_period", "price", "currency",
-            "features", "is_active",
+            "features", "entitlements", "is_active",
+            "includes_all_paid_courses", "includes_live_sessions",
+            "includes_certificates", "priority_support",
         )
+
+    def get_entitlements(self, obj):
+        """The admin's ticks as a flat map — what the plan card renders."""
+        return obj.entitlements()
+
+
+class BillingSummarySerializer(serializers.Serializer):
+    """Everything the Billing page shows, in one call (response shape only)."""
+
+    total_spent = serializers.DecimalField(max_digits=12, decimal_places=2)
+    currency = serializers.CharField()
+    active_plan = PricingPlanSerializer(allow_null=True)
+    subscription = serializers.DictField(allow_null=True)
+    entitlements = serializers.DictField()
+    invoice_count = serializers.IntegerField()
 
 
 class CoursePriceSerializer(serializers.ModelSerializer):

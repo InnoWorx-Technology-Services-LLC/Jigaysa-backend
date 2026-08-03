@@ -146,3 +146,130 @@ def test_descriptive_holds_for_manual_grade(trainer, student):
     assert graded.status_code == status.HTTP_200_OK
     assert graded.data["passed"] is True
     assert graded.data["status"] == Submission.Status.PASSED
+
+
+# --- trainer question authoring (the editor's "Save questions") -------------
+
+
+def _api(user):
+    client = APIClient()
+    client.force_authenticate(user)
+    return client
+
+
+def test_trainer_saves_a_question_set_in_one_call(trainer, quiz):
+    resp = _api(trainer).post(
+        f"/api/v1/assessments/{quiz.id}/questions/",
+        {
+            "questions": [
+                {
+                    "question_type": "mcq",
+                    "text": "Which is a hook?",
+                    "points": 2,
+                    "choices": [
+                        {"text": "useState", "is_correct": True},
+                        {"text": "componentDidMount", "is_correct": False},
+                    ],
+                },
+                {"question_type": "descriptive", "text": "Explain the diff.", "points": 5},
+            ]
+        },
+        format="json",
+    )
+
+    assert resp.status_code == status.HTTP_200_OK
+    assert len(resp.data) == 2
+    # Replaces the whole set — the fixture's questions are gone.
+    assert Question.objects.filter(assessment=quiz).count() == 2
+    quiz.refresh_from_db()
+    assert quiz.total_questions == 2
+    assert resp.data[0]["choices"][0]["is_correct"] is True
+
+
+def test_students_cannot_read_the_answer_key(student, quiz):
+    resp = _api(student).get(f"/api/v1/assessments/{quiz.id}/questions/")
+    assert resp.status_code == status.HTTP_403_FORBIDDEN
+
+
+def test_another_trainer_cannot_edit_the_question_set(quiz):
+    intruder = User.objects.create_user(
+        email="other-t@example.com", password="StrongPass123!", role=Role.TRAINER
+    )
+    resp = _api(intruder).post(
+        f"/api/v1/assessments/{quiz.id}/questions/", {"questions": []}, format="json"
+    )
+    assert resp.status_code == status.HTTP_403_FORBIDDEN
+
+
+def test_single_answer_question_rejects_two_correct_options(trainer, quiz):
+    resp = _api(trainer).post(
+        f"/api/v1/assessments/{quiz.id}/questions/",
+        {
+            "questions": [
+                {
+                    "question_type": "mcq",
+                    "text": "Pick one",
+                    "choices": [
+                        {"text": "a", "is_correct": True},
+                        {"text": "b", "is_correct": True},
+                    ],
+                }
+            ]
+        },
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST
+
+
+def test_objective_question_needs_a_correct_option(trainer, quiz):
+    resp = _api(trainer).post(
+        f"/api/v1/assessments/{quiz.id}/questions/",
+        {
+            "questions": [
+                {
+                    "question_type": "mcq",
+                    "text": "Pick one",
+                    "choices": [
+                        {"text": "a", "is_correct": False},
+                        {"text": "b", "is_correct": False},
+                    ],
+                }
+            ]
+        },
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST
+
+
+def test_authored_questions_are_gradable_end_to_end(trainer, quiz, student):
+    """The whole point: what the trainer saves must actually score a student."""
+    from courses.models import Enrollment
+
+    _api(trainer).post(
+        f"/api/v1/assessments/{quiz.id}/questions/",
+        {
+            "questions": [
+                {
+                    "question_type": "mcq",
+                    "text": "2+2?",
+                    "points": 1,
+                    "choices": [
+                        {"text": "4", "is_correct": True},
+                        {"text": "5", "is_correct": False},
+                    ],
+                }
+            ]
+        },
+        format="json",
+    )
+    Enrollment.objects.create(student=student, course=quiz.course)
+    question = Question.objects.get(assessment=quiz)
+    correct = question.choices.get(is_correct=True)
+
+    resp = _api(student).post(
+        f"/api/v1/assessments/{quiz.id}/submit/",
+        {"answers": [{"question": question.id, "selected_choices": [correct.id]}]},
+        format="json",
+    )
+    assert resp.status_code in (status.HTTP_200_OK, status.HTTP_201_CREATED)
+    assert resp.data["percent"] == 100

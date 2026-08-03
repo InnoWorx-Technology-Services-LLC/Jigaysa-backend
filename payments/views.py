@@ -6,16 +6,22 @@ paid course/subscription). Coupons can be previewed before checkout. Every
 read is scoped to the current user; plans/prices/coupons are admin-authored.
 """
 
+from decimal import Decimal
+
 from django.conf import settings
+from django.db.models import Sum
+from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from core.permissions import IsAdmin
-from payments import gateway, services
+from payments import entitlements, gateway, services
 from payments.models import (
+    CURRENCY_DEFAULT,
     Coupon,
     CoursePrice,
     Invoice,
@@ -25,6 +31,7 @@ from payments.models import (
     Subscription,
 )
 from payments.serializers import (
+    BillingSummarySerializer,
     CheckoutSerializer,
     CouponSerializer,
     CouponValidateSerializer,
@@ -354,7 +361,61 @@ class SubscriptionViewSet(
 
     @action(detail=True, methods=["post"])
     def cancel(self, request, pk=None):
+        """End the subscription at the end of the period already paid for.
+
+        Cancelling does not revoke access mid-period — the student paid for
+        those days. ``cancel_at`` records when it lapses; the entitlement check
+        stops granting anything once ``current_period_end`` passes.
+        """
         subscription = self.get_object()
+        subscription.cancel_at = subscription.current_period_end or timezone.now()
         subscription.status = Subscription.Status.CANCELLED
-        subscription.save(update_fields=["status", "updated_at"])
+        subscription.save(update_fields=["status", "cancel_at", "updated_at"])
         return Response(self.get_serializer(subscription).data)
+
+    @action(detail=False, methods=["get"])
+    def current(self, request):
+        """The active subscription and what it unlocks, or ``null`` when free."""
+        subscription = entitlements.active_subscription(request.user)
+        return Response(
+            {
+                "subscription": (
+                    self.get_serializer(subscription).data if subscription else None
+                ),
+                "entitlements": entitlements.entitlements_for(request.user),
+            }
+        )
+
+
+class BillingSummaryView(APIView):
+    """GET /api/v1/billing/summary/ — one call for the whole Billing page.
+
+    Total spent, the active plan (``null`` = the free tier), what it unlocks,
+    and how many invoices exist.
+    """
+
+    permission_classes = [IsAuthenticated]
+    api_roles = ALL_ROLES
+
+    @extend_schema(responses=BillingSummarySerializer)
+    def get(self, request):
+        user = request.user
+        paid = Order.objects.filter(user=user, status=Order.Status.PAID)
+        total_spent = paid.aggregate(total=Sum("total"))["total"] or Decimal("0.00")
+        subscription = entitlements.active_subscription(user)
+        return Response(
+            {
+                "total_spent": total_spent,
+                "currency": CURRENCY_DEFAULT,
+                "active_plan": (
+                    PricingPlanSerializer(subscription.plan).data
+                    if subscription
+                    else None
+                ),
+                "subscription": (
+                    SubscriptionSerializer(subscription).data if subscription else None
+                ),
+                "entitlements": entitlements.entitlements_for(user),
+                "invoice_count": Invoice.objects.filter(user=user).count(),
+            }
+        )
