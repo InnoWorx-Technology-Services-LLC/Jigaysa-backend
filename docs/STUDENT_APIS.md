@@ -599,6 +599,14 @@ retrieve.
 
 ## 9. Discussions & community
 
+> **Full frontend guide: [STUDENT_COMMUNITY_API.md](STUDENT_COMMUNITY_API.md)**
+> — visibility rules, voting, Stack-Overflow reputation, tags and the
+> leaderboard. Summary below.
+>
+> New since this section was written: `visibility`, `tags`, `views_count`,
+> `score`/`my_vote`, `POST .../vote/` on threads and replies,
+> `GET /forum-tags/`, and `GET /community-profile/leaderboard/`.
+
 ### 9.1 Threads
 
 `GET /discussion-threads/?course=<id>&scope=course|community&status=open|resolved&q=<search>`

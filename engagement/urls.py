@@ -17,6 +17,7 @@ router.register(
     "discussion-replies", views.DiscussionReplyViewSet, basename="discussion-reply"
 )
 router.register("community-posts", views.CommunityPostViewSet, basename="community-post")
+router.register("forum-tags", views.ForumTagViewSet, basename="forum-tag")
 router.register("badges", views.BadgeViewSet, basename="badge")
 router.register(
     "community-profile", views.CommunityProfileViewSet, basename="community-profile"

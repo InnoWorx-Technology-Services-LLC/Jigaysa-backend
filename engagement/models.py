@@ -5,6 +5,8 @@ points and badges back the dashboard's community card.
 """
 
 from django.conf import settings
+from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelation
+from django.contrib.contenttypes.models import ContentType
 from django.db import models
 
 from core.models import TimeStampedModel
@@ -20,6 +22,13 @@ class DiscussionThread(TimeStampedModel):
     class Status(models.TextChoices):
         OPEN = "open", "Open"
         RESOLVED = "resolved", "Resolved"
+
+    class Visibility(models.TextChoices):
+        """Who may read the thread. **Both require login** — "public" here means
+        platform-wide, never search-engine indexable."""
+
+        COMMUNITY = "community", "My community"
+        PUBLIC = "public", "Public"
 
     course = models.ForeignKey(
         "courses.Course",
@@ -48,8 +57,21 @@ class DiscussionThread(TimeStampedModel):
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.OPEN
     )
+    visibility = models.CharField(
+        max_length=20, choices=Visibility.choices, default=Visibility.COMMUNITY
+    )
+    # Reuses courses.Tag rather than a forum-only tag table — the same
+    # vocabulary already tags profiles and courses, and two tag tables would
+    # mean "python" existing twice with divergent counts.
+    tags = models.ManyToManyField("courses.Tag", blank=True, related_name="threads")
     is_pinned = models.BooleanField(default=False)
     reply_count = models.PositiveIntegerField(default=0)
+    views_count = models.PositiveIntegerField(default=0)
+    # Signed: a heavily downvoted question goes below zero, as on Stack Overflow.
+    score = models.IntegerField(default=0)
+    # Declared so deleting a thread takes its votes with it — a generic FK has
+    # no database-level cascade of its own.
+    votes = GenericRelation("Vote", related_query_name="thread")
     last_activity_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -79,6 +101,8 @@ class DiscussionReply(TimeStampedModel):
     )
     body = models.TextField()
     is_accepted_answer = models.BooleanField(default=False)
+    score = models.IntegerField(default=0)
+    votes = GenericRelation("Vote", related_query_name="reply")
 
     class Meta:
         ordering = ["created_at"]
@@ -86,6 +110,67 @@ class DiscussionReply(TimeStampedModel):
 
     def __str__(self):
         return f"Reply by {self.author} on {self.thread}"
+
+
+class Vote(TimeStampedModel):
+    """An up/down vote on a thread or a reply (Stack Overflow style).
+
+    One row per user per post is what makes a vote *changeable* rather than a
+    counter bump: re-voting the same way removes it, voting the other way flips
+    it, and reputation is adjusted by the difference either way.
+
+    The target is a generic relation rather than two nullable FKs on purpose.
+    Nullable FKs would need *conditional* unique constraints, which MySQL
+    silently refuses to create (``models.W036``) — the one thing stopping a
+    double vote would quietly not exist in production. A single non-null
+    ``(user, content_type, object_id)`` unique key is enforced everywhere.
+    """
+
+    UP = 1
+    DOWN = -1
+    VALUE_CHOICES = ((UP, "Up"), (DOWN, "Down"))
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="votes"
+    )
+    content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
+    object_id = models.PositiveIntegerField()
+    target = GenericForeignKey("content_type", "object_id")
+    value = models.SmallIntegerField(choices=VALUE_CHOICES)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "content_type", "object_id"],
+                name="unique_vote_per_user_per_post",
+            )
+        ]
+        indexes = [models.Index(fields=["content_type", "object_id"])]
+
+    def __str__(self):
+        return f"{self.user} {self.get_value_display()} on {self.target}"
+
+
+class PointRule(TimeStampedModel):
+    """How many points an activity is worth — editable by an admin.
+
+    The values ship as Stack Overflow's, but reputation economies need tuning
+    per platform, and changing them should not need a deploy. Look-ups fall back
+    to the built-in defaults when a row is missing, so deleting one cannot
+    silently turn an award into zero.
+    """
+
+    activity = models.SlugField(max_length=60, unique=True)
+    label = models.CharField(max_length=120, blank=True)
+    # Signed: downvotes cost the author points, and casting one costs the voter.
+    points = models.IntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["activity"]
+
+    def __str__(self):
+        return f"{self.activity}: {self.points:+d}"
 
 
 class CommunityProfile(TimeStampedModel):
