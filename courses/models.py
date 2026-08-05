@@ -115,10 +115,17 @@ class Course(TimeStampedModel):
     language = models.CharField(max_length=20, default="en")
     duration_minutes = models.PositiveIntegerField(default=0)
     thumbnail = models.URLField(blank=True)
+    # Object-storage keys for uploaded cover art / intro video, mirroring
+    # ``Lesson.video_key``. The presign endpoint hands back a *key*, not a URL,
+    # and a key does not fit a URLField — without these the documented upload
+    # flow 400s on save. Serializers resolve them to a public CDN URL, because
+    # these are marketing assets a logged-out visitor has to be able to load.
+    thumbnail_key = models.CharField(max_length=1024, blank=True)
     # Fallback cover colour when no image is uploaded — the swatch picker in the
     # trainer editor, and what the student's course cards render.
     thumbnail_color = models.CharField(max_length=20, blank=True)
     intro_video_url = models.URLField(blank=True)
+    intro_video_key = models.CharField(max_length=1024, blank=True)
     # "What will students get out of it?" — a list of plain strings so the
     # editor can add/remove bullets without a row per outcome.
     outcomes = models.JSONField(default=list, blank=True)

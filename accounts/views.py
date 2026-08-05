@@ -4,7 +4,9 @@ from django.contrib.auth.tokens import default_token_generator
 from django.core.cache import cache
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
-from rest_framework import generics, status
+from rest_framework import generics, mixins, status, viewsets
+from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -12,7 +14,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from accounts.models import LoginActivity, User
+from accounts.models import LoginActivity, TrainerProfile, User
 from accounts.providers import get_sms_provider
 from accounts.serializers import (
     LogoutSerializer,
@@ -22,8 +24,15 @@ from accounts.serializers import (
     PasswordResetRequestSerializer,
     RegisterSerializer,
     TokenPairSerializer,
+    TrainerProfileSerializer,
     UserSerializer,
 )
+from notifications.models import NotificationCategory
+from notifications.services import notify
+
+
+def _is_admin(user):
+    return getattr(user, "role", None) == "admin"
 
 # OTP settings (kept simple; move to settings for prod tuning).
 OTP_TTL_SECONDS = 300
@@ -273,3 +282,95 @@ class PasswordResetConfirmView(APIView):
         user.set_password(data["new_password"])
         user.save(update_fields=["password"])
         return Response({"detail": "Password has been reset. You can now log in."})
+
+
+class TrainerProfileViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,
+    viewsets.GenericViewSet,
+):
+    """Trainer teaching profiles and the **admin approval gate** (PRD §2.1
+    "Trainer onboarding").
+
+    A trainer only becomes bookable as a mentor once an admin approves them —
+    ``GET /mentors/`` filters on exactly this flag. Before this existed the flag
+    could only be flipped in a database shell, which meant the mentor list was
+    permanently empty in production.
+
+    * trainers see and edit **only their own** profile (rate, expertise)
+    * admins see every profile and are the only ones who can approve
+    """
+
+    serializer_class = TrainerProfileSerializer
+    permission_classes = [IsAuthenticated]
+    api_roles = ("trainer", "admin")
+    api_roles_by_action = {
+        "list": ("admin",),
+        "approve": ("admin",),
+        "unapprove": ("admin",),
+    }
+
+    def get_queryset(self):
+        qs = TrainerProfile.objects.select_related("user").order_by(
+            "is_approved", "-created_at"
+        )
+        if _is_admin(self.request.user):
+            pending = self.request.query_params.get("is_approved")
+            if pending is not None:
+                qs = qs.filter(is_approved=pending.lower() in ("1", "true", "yes"))
+            return qs
+        return qs.filter(user=self.request.user)
+
+    def perform_update(self, serializer):
+        if (
+            serializer.instance.user_id != self.request.user.id
+            and not _is_admin(self.request.user)
+        ):
+            raise PermissionDenied("You can only edit your own trainer profile.")
+        serializer.save()
+
+    @action(detail=False, methods=["get", "patch"])
+    def me(self, request):
+        """The caller's own profile, created on first read if missing."""
+        if getattr(request.user, "role", None) not in ("trainer", "admin"):
+            raise PermissionDenied("Only trainers have a teaching profile.")
+        profile, _ = TrainerProfile.objects.get_or_create(user=request.user)
+        if request.method == "GET":
+            return Response(self.get_serializer(profile).data)
+        serializer = self.get_serializer(profile, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+    def _set_approved(self, request, approved):
+        if not _is_admin(request.user):
+            raise PermissionDenied("Only an admin can change trainer approval.")
+        profile = self.get_object()
+        profile.is_approved = approved
+        profile.save(update_fields=["is_approved", "updated_at"])
+        notify(
+            profile.user,
+            NotificationCategory.SYSTEM,
+            title=(
+                "You're approved as a mentor 🎉" if approved
+                else "Mentor approval withdrawn"
+            ),
+            body=(
+                "Students can now find you and book 1:1 sessions."
+                if approved
+                else "Your profile is no longer listed for 1:1 bookings."
+            ),
+            link="/trainer/settings",
+        )
+        return Response(self.get_serializer(profile).data)
+
+    @action(detail=True, methods=["post"])
+    def approve(self, request, pk=None):
+        """Admin: make this trainer discoverable and bookable as a mentor."""
+        return self._set_approved(request, True)
+
+    @action(detail=True, methods=["post"])
+    def unapprove(self, request, pk=None):
+        """Admin: remove them from the mentor list. Existing bookings stand."""
+        return self._set_approved(request, False)

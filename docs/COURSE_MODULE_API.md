@@ -517,16 +517,7 @@ list → "No downloadable resources for this lesson."
 
 ---
 
-## 4. Not built — don't build UI for it
 
-- **AI**: "Generate with AI" (curriculum), "Improve with AI" (description),
-  "AI lesson summary / Summarize". There is **no AI integration anywhere** in the
-  codebase — these buttons have nothing to call.
-- **Promotions / campaigns** — no models, no endpoints.
-- **Trainer analytics, earnings, student roster** — the "SOON" nav items.
-- **Publish-readiness %** — compute it client-side; no backend field.
-- **Course-level bulk reorder** — reorder by PATCHing each `order`.
-- **Certificate PDF** — `pdf_url` on a certificate is empty.
 
 ## 5. Two frontend badges to remove
 

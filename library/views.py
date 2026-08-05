@@ -11,7 +11,7 @@ from django.db.models import F, Q
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from library.models import LibraryBookmark, LibraryResource
@@ -49,6 +49,8 @@ class LibraryResourceViewSet(viewsets.ModelViewSet):
     lookup_field = "slug"
     api_roles = ALL_ROLES
     api_roles_by_action = {
+        "list": ("public",),
+        "retrieve": ("public",),
         "create": AUTHOR_WRITE,
         "update": AUTHOR_WRITE,
         "partial_update": AUTHOR_WRITE,
@@ -56,6 +58,10 @@ class LibraryResourceViewSet(viewsets.ModelViewSet):
     }
 
     def get_permissions(self):
+        # The free library is public by definition (PRD §3.10), so browsing it
+        # must work logged-out. Bookmarking and authoring stay authenticated.
+        if self.action in ("list", "retrieve"):
+            return [AllowAny()]
         return [IsAuthenticated()]
 
     def _assert_can_author(self, resource=None):

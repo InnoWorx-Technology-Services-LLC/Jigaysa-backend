@@ -11,7 +11,7 @@ from django.utils import timezone
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from core.permissions import IsAdmin
@@ -79,12 +79,18 @@ def _filter_by(qs, request, param, field=None):
 
 
 class CategoryViewSet(viewsets.ModelViewSet):
-    """Course taxonomy. Anyone authenticated can read; only admins write."""
+    """Course taxonomy. **Reads are public**; only admins write.
+
+    The public marketing site and search-engine crawlers browse the catalog
+    logged-out, so the taxonomy has to be readable without a token.
+    """
 
     queryset = Category.objects.all()
     serializer_class = CategorySerializer
     api_roles = ALL_ROLES
     api_roles_by_action = {
+        "list": ("public",),
+        "retrieve": ("public",),
         "create": ("admin",),
         "update": ("admin",),
         "partial_update": ("admin",),
@@ -93,15 +99,19 @@ class CategoryViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in ("list", "retrieve"):
-            return [IsAuthenticated()]
+            return [AllowAny()]
         return [IsAdmin()]
 
 
 class TagViewSet(viewsets.ModelViewSet):
+    """Tags. **Reads are public** (see ``CategoryViewSet``); admins write."""
+
     queryset = Tag.objects.all()
     serializer_class = TagSerializer
     api_roles = ALL_ROLES
     api_roles_by_action = {
+        "list": ("public",),
+        "retrieve": ("public",),
         "create": ("admin",),
         "update": ("admin",),
         "partial_update": ("admin",),
@@ -110,7 +120,7 @@ class TagViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in ("list", "retrieve"):
-            return [IsAuthenticated()]
+            return [AllowAny()]
         return [IsAdmin()]
 
 
@@ -130,9 +140,12 @@ class CourseViewSet(viewsets.ModelViewSet):
 
     lookup_field = "slug"
     permission_classes = [IsAuthenticated, IsTrainerOwnerOrReadOnly]
-    api_roles = ALL_ROLES  # list / retrieve / curriculum
+    api_roles = ALL_ROLES
     api_roles_by_action = {
         **_AUTHORING_BY_ACTION,
+        "list": ("public",),
+        "retrieve": ("public",),
+        "curriculum": ("public",),
         "publish": TRAINER_WRITE,
         "reject": ("admin",),
         "review_queue": ("admin",),
@@ -140,11 +153,19 @@ class CourseViewSet(viewsets.ModelViewSet):
         "enroll": ("student",),
     }
 
+    #: Reads anyone may make, logged in or not — the public catalog, a course
+    #: detail page and the preview curriculum. Everything else stays gated.
+    PUBLIC_ACTIONS = ("list", "retrieve", "curriculum")
+
     def get_permissions(self):
+        # Catalog reads are open so the marketing site and crawlers work
+        # logged-out. ``get_queryset`` still hides drafts and non-public courses
+        # from anonymous callers, so this opens visibility, not content.
+        if self.action in self.PUBLIC_ACTIONS:
+            return [AllowAny()]
         # Enrolling is open to any authenticated user; the ownership check only
-        # gates authoring/publish. (Reads pass IsTrainerOwnerOrReadOnly anyway
-        # since SAFE methods are allowed.) Without this, get_object() in the
-        # enroll action would run the owner check and 403 every student.
+        # gates authoring/publish. Without this, get_object() in the enroll
+        # action would run the owner check and 403 every student.
         if self.action == "enroll":
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsTrainerOwnerOrReadOnly()]
@@ -163,8 +184,16 @@ class CourseViewSet(viewsets.ModelViewSet):
         )
 
         # Visibility: admins see all; trainers see their own + published public;
-        # everyone else sees only published public courses.
-        if not _is_admin(user):
+        # everyone else — including anonymous visitors — sees only published
+        # public courses. The anonymous branch is spelled out rather than left
+        # to fall through: this is what stops drafts and pending-review courses
+        # becoming world-readable now that reads are open.
+        if not user.is_authenticated:
+            qs = qs.filter(
+                status=Course.Status.PUBLISHED,
+                visibility=Course.Visibility.PUBLIC,
+            )
+        elif not _is_admin(user):
             if getattr(user, "role", None) == "trainer":
                 qs = qs.filter(
                     Q(
@@ -290,7 +319,15 @@ class CourseViewSet(viewsets.ModelViewSet):
         users who are not enrolled / the owner / an admin."""
         course = self.get_object()
         user = request.user
-        enrollment = Enrollment.objects.filter(student=user, course=course).first()
+        # Anonymous visitors get the same shape with ``has_access: false`` and
+        # only preview lessons playable. The enrollment lookup is skipped rather
+        # than attempted: filtering on an ``AnonymousUser`` raises, so opening
+        # this action without the guard would 500 instead of returning a preview.
+        enrollment = (
+            Enrollment.objects.filter(student=user, course=course).first()
+            if user.is_authenticated
+            else None
+        )
         has_access = _has_course_access(user, course, enrollment)
 
         # Fold the student's per-lesson progress in so the player renders the
@@ -357,6 +394,8 @@ def _has_course_access(user, course, enrollment):
     enrollments only count while the entitlement is still live; a purchased or
     free enrollment is theirs to keep either way.
     """
+    if not getattr(user, "is_authenticated", False):
+        return False
     if _is_admin(user) or course.trainer_id == user.id:
         return True
     if entitlements.can_access_paid_courses(user):

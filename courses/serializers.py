@@ -179,11 +179,40 @@ class ModulePlayerSerializer(serializers.ModelSerializer):
         fields = ("id", "title", "summary", "order", "lessons")
 
 
-class CourseListSerializer(serializers.ModelSerializer):
+def public_media_url(stored_url, key):
+    """Resolve an uploaded object to something a browser can load.
+
+    Course cover art and the intro video are public marketing assets shown on
+    the logged-out catalog, so they resolve to a plain CDN/bucket URL rather
+    than a short-lived presigned link — an anonymous visitor has no token to
+    call the presign endpoint with, and a signed URL would expire in the page.
+    Private teaching content (``Lesson.video_key``) is still presigned.
+    """
+    if key:
+        try:
+            from core import storage
+
+            if storage.is_configured():
+                return storage.public_url(key)
+        except Exception:
+            pass  # fall through to whatever URL was stored
+    return stored_url
+
+
+class MediaUrlMixin:
+    def get_thumbnail(self, obj):
+        return public_media_url(obj.thumbnail, obj.thumbnail_key)
+
+    def get_intro_video_url(self, obj):
+        return public_media_url(obj.intro_video_url, obj.intro_video_key)
+
+
+class CourseListSerializer(MediaUrlMixin, serializers.ModelSerializer):
     """Lightweight catalog card."""
 
     trainer = TrainerMiniSerializer(read_only=True)
     category = serializers.StringRelatedField()
+    thumbnail = serializers.SerializerMethodField()
 
     class Meta:
         model = Course
@@ -199,6 +228,7 @@ class CourseListSerializer(serializers.ModelSerializer):
             "language",
             "duration_minutes",
             "thumbnail",
+            "thumbnail_key",
             "thumbnail_color",
             "is_free",
             "status",
@@ -210,12 +240,14 @@ class CourseListSerializer(serializers.ModelSerializer):
         )
 
 
-class CourseDetailSerializer(serializers.ModelSerializer):
+class CourseDetailSerializer(MediaUrlMixin, serializers.ModelSerializer):
     """Full course read shape with embedded taxonomy and trainer."""
 
     trainer = TrainerMiniSerializer(read_only=True)
     category = CategorySerializer(read_only=True)
     tags = TagSerializer(many=True, read_only=True)
+    thumbnail = serializers.SerializerMethodField()
+    intro_video_url = serializers.SerializerMethodField()
     module_count = serializers.IntegerField(
         source="modules.count", read_only=True
     )
@@ -237,8 +269,10 @@ class CourseDetailSerializer(serializers.ModelSerializer):
             "language",
             "duration_minutes",
             "thumbnail",
+            "thumbnail_key",
             "thumbnail_color",
             "intro_video_url",
+            "intro_video_key",
             "outcomes",
             "welcome_message",
             "completion_message",
@@ -285,8 +319,10 @@ class CourseWriteSerializer(serializers.ModelSerializer):
             "language",
             "duration_minutes",
             "thumbnail",
+            "thumbnail_key",
             "thumbnail_color",
             "intro_video_url",
+            "intro_video_key",
             "outcomes",
             "welcome_message",
             "completion_message",

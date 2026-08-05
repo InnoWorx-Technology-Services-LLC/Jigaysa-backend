@@ -3,7 +3,7 @@ from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
-from accounts.models import Role
+from accounts.models import Role, TrainerProfile
 
 User = get_user_model()
 
@@ -116,3 +116,40 @@ class OTPVerifySerializer(serializers.Serializer):
 
     phone = serializers.CharField(max_length=20)
     code = serializers.CharField(max_length=6)
+
+
+class TrainerProfileSerializer(serializers.ModelSerializer):
+    """A trainer's teaching profile.
+
+    ``is_approved`` is read-only here on purpose — approval is an admin decision
+    made through the dedicated actions, not something a trainer can grant
+    themselves by PATCHing their own profile.
+    """
+
+    user_id = serializers.IntegerField(source="user.id", read_only=True)
+    full_name = serializers.CharField(source="user.full_name", read_only=True)
+    email = serializers.EmailField(source="user.email", read_only=True)
+
+    class Meta:
+        model = TrainerProfile
+        fields = (
+            "id",
+            "user_id",
+            "full_name",
+            "email",
+            "expertise",
+            "years_experience",
+            "hourly_rate",
+            "rating_avg",
+            "rating_count",
+            "is_approved",
+            "revenue_share_pct",
+            "created_at",
+        )
+        read_only_fields = (
+            "rating_avg",
+            "rating_count",
+            "is_approved",
+            "revenue_share_pct",
+            "created_at",
+        )

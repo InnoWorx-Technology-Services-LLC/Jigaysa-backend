@@ -14,6 +14,7 @@ urlpatterns = [
 
     # API v1
     path("api/v1/auth/", include("accounts.urls")),
+    path("api/v1/", include("accounts.api_urls")),
     path("api/v1/", include("courses.urls")),
     path("api/v1/", include("certificates.urls")),
     path("api/v1/", include("library.urls")),
