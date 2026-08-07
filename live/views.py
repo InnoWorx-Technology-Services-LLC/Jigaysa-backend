@@ -17,6 +17,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from accounts.models import User
+from courses.models import Enrollment
 from live.models import (
     IndividualBooking,
     LiveSession,
@@ -57,11 +58,42 @@ def _filter_by(qs, request, param, field=None):
     return qs
 
 
+# An enrollment the student pulled out of buys nothing; a finished one still
+# lets them attend the alumni Q&A they paid for.
+ATTENDING_STATUSES = (Enrollment.Status.ACTIVE, Enrollment.Status.COMPLETED)
+
+
+def _scope_to_enrollments(qs, user):
+    """Hide course-bound sessions from students who aren't in that course.
+
+    Mirrors the recordings rule (``recordings.views._has_access``): a session
+    with **no** course and **no** batch is an open workshop anyone may attend,
+    but the moment a trainer attaches it to a course it becomes course material
+    and only that course's students may see it. A batch-bound session narrows
+    further to that cohort — a student in another batch of the same course is
+    not in the room.
+
+    Applied to the queryset rather than the actions, so ``retrieve``,
+    ``register``, ``join`` and ``raise-doubt`` all inherit it: a non-enrolled
+    student gets a 404 and never learns the session exists.
+    """
+    enrolled = Enrollment.objects.filter(student=user, status__in=ATTENDING_STATUSES)
+    return qs.filter(
+        Q(course__isnull=True, batch__isnull=True)
+        | Q(batch_id__in=enrolled.exclude(batch__isnull=True).values("batch_id"))
+        | Q(batch__isnull=True, course_id__in=enrolled.values("course_id"))
+    )
+
+
 class LiveSessionViewSet(viewsets.ModelViewSet):
     """Live sessions. Filters: ``?course=<id>``, ``?batch=<id>``, ``?trainer=<id>``,
     ``?status=scheduled|live|completed|cancelled``, ``?upcoming=true``,
     ``?mine=true`` (trainer's own). Authoring is limited to the owning trainer or
-    an admin; students register/join/raise doubts via custom actions."""
+    an admin; students register/join/raise doubts via custom actions.
+
+    Students see open sessions (no course, no batch) plus the sessions of courses
+    and batches they are enrolled in — see ``_scope_to_enrollments``. Trainers and
+    admins see every session."""
 
     permission_classes = [IsAuthenticated]
     api_roles = ALL_ROLES
@@ -84,6 +116,8 @@ class LiveSessionViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = LiveSession.objects.select_related("trainer", "course", "batch")
         params = self.request.query_params
+        if not _is_trainer_role(self.request.user):
+            qs = _scope_to_enrollments(qs, self.request.user)
         qs = _filter_by(qs, self.request, "course", "course_id")
         qs = _filter_by(qs, self.request, "batch", "batch_id")
         qs = _filter_by(qs, self.request, "trainer", "trainer_id")

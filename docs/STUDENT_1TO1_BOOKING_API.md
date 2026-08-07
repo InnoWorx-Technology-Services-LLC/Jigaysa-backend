@@ -201,7 +201,8 @@ new state the UI needs.
 
 ### Page counters
 
-Derive client-side from the bookings list — there is no summary endpoint:
+Derive client-side from the bookings list — there is no summary endpoint, and
+no `?status=` filter either, so page past the 20-row default before counting:
 
 - **Upcoming** — count of `pending` + `awaiting_payment` + `confirmed`
 - **Completed** — count of `completed`
@@ -273,6 +274,18 @@ These are for the mentor UI, not the student app:
 All return the updated booking; all `400` with
 `This booking is already <status>.` on an invalid transition. A trainer who
 doesn't own the booking gets **`404`**.
+
+### Trainer-only — publishing availability
+
+| Endpoint | Notes |
+|---|---|
+| `GET /trainer-availability/?mine=true` | **`?mine=true` is required** — unfiltered returns *every* trainer's slots |
+| `POST /trainer-availability/` | `{ "start": "…", "end": "…", "slot_minutes": 60 }` |
+| `DELETE /trainer-availability/{id}/` | own slots only |
+
+⚠️ **`end` is required; `slot_minutes` is not** (it defaults to `60`). A
+"start + duration" form must compute `end` itself, or the POST `400`s with
+`{"end": ["This field is required."]}`.
 
 ---
 

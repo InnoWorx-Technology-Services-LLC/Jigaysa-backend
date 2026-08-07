@@ -8,6 +8,7 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from accounts.models import Role, TrainerProfile, User
+from courses.models import Batch, Category, Course, Enrollment
 from live.models import (
     IndividualBooking,
     LiveSession,
@@ -31,6 +32,18 @@ def student():
     return User.objects.create_user(
         email="stu@example.com", password="StrongPass123!", role=Role.STUDENT
     )
+
+
+def set_profile(trainer, **fields):
+    """Set teaching-profile fields on a trainer, returning the trainer.
+
+    ``accounts.signals.ensure_trainer_profile`` already created the row when the
+    user was saved, so a plain ``create()`` here would collide with the
+    one-profile-per-trainer constraint. Tests describe the profile they want and
+    let this reconcile it.
+    """
+    TrainerProfile.objects.update_or_create(user=trainer, defaults=fields)
+    return trainer
 
 
 @pytest.fixture
@@ -85,6 +98,95 @@ def test_join_requires_registration(session, student):
     assert resp.status_code == status.HTTP_400_BAD_REQUEST
 
 
+# -- visibility: course-bound sessions are for enrolled students only -------- #
+
+
+@pytest.fixture
+def course(trainer):
+    return Course.objects.create(
+        title="Pandas", trainer=trainer, is_free=True,
+        category=Category.objects.create(name="Data"),
+        status=Course.Status.PUBLISHED,
+    )
+
+
+def _titles(api):
+    return {s["title"] for s in api.get("/api/v1/live-sessions/").data["results"]}
+
+
+def test_course_session_hidden_from_unenrolled_student(course, trainer, student):
+    LiveSession.objects.create(trainer=trainer, course=course, title="Course only")
+    LiveSession.objects.create(trainer=trainer, title="Open workshop")
+    api = APIClient()
+    api.force_authenticate(student)
+    assert _titles(api) == {"Open workshop"}
+
+
+def test_course_session_visible_once_enrolled(course, trainer, student):
+    session = LiveSession.objects.create(
+        trainer=trainer, course=course, title="Course only"
+    )
+    Enrollment.objects.create(
+        student=student, course=course,
+        status=Enrollment.Status.ACTIVE, source=Enrollment.Source.FREE,
+    )
+    api = APIClient()
+    api.force_authenticate(student)
+    assert _titles(api) == {"Course only"}
+    # And the whole action surface opens up with it.
+    assert (
+        api.post(f"/api/v1/live-sessions/{session.id}/register/").status_code
+        == status.HTTP_201_CREATED
+    )
+
+
+def test_unenrolled_student_cannot_register_or_join(course, trainer, student):
+    session = LiveSession.objects.create(
+        trainer=trainer, course=course, title="Course only"
+    )
+    api = APIClient()
+    api.force_authenticate(student)
+    # 404, not 403 — the session's existence isn't leaked.
+    for path in ("register", "join", "raise-doubt"):
+        resp = api.post(f"/api/v1/live-sessions/{session.id}/{path}/")
+        assert resp.status_code == status.HTTP_404_NOT_FOUND
+
+
+def test_refunded_enrollment_loses_access(course, trainer, student):
+    LiveSession.objects.create(trainer=trainer, course=course, title="Course only")
+    Enrollment.objects.create(
+        student=student, course=course,
+        status=Enrollment.Status.REFUNDED, source=Enrollment.Source.PURCHASE,
+    )
+    api = APIClient()
+    api.force_authenticate(student)
+    assert _titles(api) == set()
+
+
+def test_batch_session_limited_to_that_batch(course, trainer, student):
+    mine = Batch.objects.create(course=course, name="Morning")
+    theirs = Batch.objects.create(course=course, name="Evening")
+    LiveSession.objects.create(trainer=trainer, course=course, batch=mine, title="Mine")
+    LiveSession.objects.create(
+        trainer=trainer, course=course, batch=theirs, title="Theirs"
+    )
+    Enrollment.objects.create(
+        student=student, course=course, batch=mine,
+        status=Enrollment.Status.ACTIVE, source=Enrollment.Source.FREE,
+    )
+    api = APIClient()
+    api.force_authenticate(student)
+    assert _titles(api) == {"Mine"}
+
+
+def test_trainer_still_sees_every_session(course, trainer):
+    LiveSession.objects.create(trainer=trainer, course=course, title="Course only")
+    LiveSession.objects.create(trainer=trainer, title="Open workshop")
+    api = APIClient()
+    api.force_authenticate(trainer)
+    assert _titles(api) == {"Course only", "Open workshop"}
+
+
 # -- 1:1 booking (PRD §3.6) ------------------------------------------------- #
 
 
@@ -111,9 +213,7 @@ def _book(api, trainer, slot, topic="React hooks deep dive"):
 
 
 def test_mentor_list_returns_approved_trainers_with_rate(trainer, student):
-    TrainerProfile.objects.create(
-        user=trainer, is_approved=True, hourly_rate=1500, expertise="React"
-    )
+    set_profile(trainer, is_approved=True, hourly_rate=1500, expertise="React")
     api = APIClient()
     api.force_authenticate(student)
     resp = api.get("/api/v1/mentors/")
@@ -125,7 +225,7 @@ def test_mentor_list_returns_approved_trainers_with_rate(trainer, student):
 
 
 def test_unapproved_trainer_is_not_bookable(trainer, student):
-    TrainerProfile.objects.create(user=trainer, is_approved=False)
+    set_profile(trainer, is_approved=False)
     api = APIClient()
     api.force_authenticate(student)
     assert resp_ids(api.get("/api/v1/mentors/")) == []
@@ -233,10 +333,7 @@ def test_confirming_a_cancelled_booking_writes_nothing(trainer, student, slot):
 
 @pytest.fixture
 def paid_trainer(trainer):
-    TrainerProfile.objects.create(
-        user=trainer, is_approved=True, hourly_rate=Decimal("1500")
-    )
-    return trainer
+    return set_profile(trainer, is_approved=True, hourly_rate=Decimal("1500"))
 
 
 def _confirm(trainer, booking_id):
@@ -260,7 +357,7 @@ def test_confirm_prices_the_session_and_awaits_payment(paid_trainer, student, sl
 
 
 def test_free_mentor_confirms_without_payment(trainer, student, slot):
-    TrainerProfile.objects.create(user=trainer, is_approved=True, hourly_rate=0)
+    set_profile(trainer, is_approved=True, hourly_rate=0)
     api = APIClient()
     api.force_authenticate(student)
     booking_id = _book(api, trainer, slot).data["id"]
