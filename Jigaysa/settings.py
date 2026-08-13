@@ -256,7 +256,10 @@ AWS_S3_MAX_UPLOAD_BYTES = env.int(
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+# Datetimes are always *stored* in UTC (USE_TZ). TIME_ZONE only sets the default
+# display zone: API responses render as +05:30 and naive datetimes are read as
+# IST. Per-user overrides live on ``accounts.Profile.timezone``.
+TIME_ZONE = env("TIME_ZONE", default="Asia/Kolkata")
 
 USE_I18N = True
 

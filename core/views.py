@@ -1,19 +1,28 @@
-"""Media upload endpoints (direct-to-S3 via presigned URLs).
+"""Media upload endpoints (direct-to-S3 via presigned URLs) and platform settings.
 
-These never handle file bytes: they only mint short-lived credentials. The
-frontend uploads straight to the bucket, then stores the returned ``key`` on the
-owning resource (e.g. ``LibraryResource.file_url``, ``Course.thumbnail``). To
-render a private object later, call the download endpoint for a presigned GET.
+The upload endpoints never handle file bytes: they only mint short-lived
+credentials. The frontend uploads straight to the bucket, then stores the
+returned ``key`` on the owning resource (e.g. ``LibraryResource.file_url``,
+``Course.thumbnail``). To render a private object later, call the download
+endpoint for a presigned GET.
 """
 
 from django.conf import settings
+from drf_spectacular.utils import extend_schema
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core import storage
-from core.serializers import PresignDownloadSerializer, PresignUploadSerializer
+from core.models import PlatformSetting
+from core.permissions import IsAdmin
+from core.serializers import (
+    PlatformSettingSerializer,
+    PresignDownloadSerializer,
+    PresignUploadSerializer,
+    PublicPlatformSettingSerializer,
+)
 
 ALL_ROLES = ("student", "trainer", "admin", "institution")
 
@@ -100,4 +109,54 @@ class PresignDownloadView(APIView):
             )
         return Response(
             {"download_url": url, "expires_in": settings.AWS_S3_DOWNLOAD_EXPIRY}
+        )
+
+
+class PlatformSettingView(APIView):
+    """GET / PATCH ``/api/v1/platform-settings/`` — admin-only, the whole row.
+
+    A singleton, so there is no id in the path and no list. ``PATCH`` with just
+    the fields you changed; the gateway secrets are write-only (see
+    ``PlatformSettingSerializer``).
+    """
+
+    permission_classes = [IsAdmin]
+    serializer_class = PlatformSettingSerializer
+    api_roles = ("admin",)
+
+    @extend_schema(responses=PlatformSettingSerializer)
+    def get(self, request):
+        return Response(PlatformSettingSerializer(PlatformSetting.get_solo()).data)
+
+    @extend_schema(
+        request=PlatformSettingSerializer, responses=PlatformSettingSerializer
+    )
+    def patch(self, request):
+        # ``get_solo`` may hand back an unsaved default when the seed migration
+        # hasn't run; saving it is what materialises the singleton.
+        serializer = PlatformSettingSerializer(
+            PlatformSetting.get_solo(), data=request.data, partial=True
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+
+class PublicPlatformSettingView(APIView):
+    """GET ``/api/v1/platform-settings/public/`` — branding + feature flags.
+
+    Open to anonymous callers: the landing page needs the platform name before
+    anyone has signed in, and the student UI needs the flags to know whether to
+    draw the coupon box. Deliberately excludes the tax rate, the commission
+    split and every credential.
+    """
+
+    permission_classes = [AllowAny]
+    serializer_class = PublicPlatformSettingSerializer
+    api_roles = ("public",)
+
+    @extend_schema(responses=PublicPlatformSettingSerializer)
+    def get(self, request):
+        return Response(
+            PublicPlatformSettingSerializer(PlatformSetting.get_solo()).data
         )

@@ -21,7 +21,7 @@ import logging
 from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
-from django.db import transaction
+from django.db import models, transaction
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
@@ -41,8 +41,23 @@ from payments.models import (
 
 logger = logging.getLogger(__name__)
 
-# GST rate applied to the discounted subtotal (PRD §3.3 Taxes/GST).
+# Fallback GST rate applied to the discounted subtotal (PRD §3.3 Taxes/GST).
+# The live rate comes from platform settings; this is what is used before the
+# settings row exists.
 GST_PERCENT = Decimal("18")
+
+
+def gst_percent() -> Decimal:
+    """The GST rate in force right now, from platform settings.
+
+    Read per quote, never cached. An order snapshots ``tax_gst`` at creation, so
+    changing the rate reprices future carts and leaves placed orders — and the
+    invoices already issued against them — exactly as they were quoted.
+    """
+    from core.models import PlatformSetting  # lazy: avoids an app-load cycle
+
+    value = PlatformSetting.get_solo().gst_percent
+    return Decimal(value if value is not None else GST_PERCENT)
 
 _PERIOD_DAYS = {
     PricingPlan.BillingPeriod.MONTHLY: 30,
@@ -123,6 +138,12 @@ def resolve_line_item(item_type, object_id, user=None):
 def validate_coupon(code, subtotal, item_types):
     """Return an applicable ``Coupon`` for this cart or raise. ``item_types`` is
     the set of item types in the order, used to enforce coupon scope."""
+    from core.models import PlatformSetting  # lazy: avoids an app-load cycle
+
+    # Enforced here rather than in the view so the kill switch covers order
+    # creation and the "preview my discount" endpoint with one check.
+    if not PlatformSetting.get_solo().allow_coupon_codes:
+        raise ValidationError("Coupon codes are currently disabled.")
     coupon = Coupon.objects.filter(code=code, is_active=True).first()
     if coupon is None:
         raise ValidationError("Invalid or inactive coupon.")
@@ -177,7 +198,7 @@ def quote(items, coupon_code=None, user=None):
         discount = coupon_discount(coupon, subtotal)
 
     taxable = subtotal - discount
-    gst = money(taxable * GST_PERCENT / 100)
+    gst = money(taxable * gst_percent() / 100)
     total = money(taxable + gst)
     return {
         "items": resolved,
@@ -191,6 +212,8 @@ def quote(items, coupon_code=None, user=None):
 
 @transaction.atomic
 def create_order(user, items, coupon_code=None):
+    from core.models import PlatformSetting  # lazy: avoids an app-load cycle
+
     q = quote(items, coupon_code, user=user)
     order = Order.objects.create(
         user=user,
@@ -199,6 +222,9 @@ def create_order(user, items, coupon_code=None):
         discount=q["discount"],
         tax_gst=q["tax_gst"],
         total=q["total"],
+        # Stamped from settings at creation, so a later currency change cannot
+        # reinterpret the amount an order was already placed for.
+        currency=PlatformSetting.get_solo().default_currency,
         coupon=q["coupon"],
     )
     OrderItem.objects.bulk_create(
@@ -625,17 +651,59 @@ def retry_refund(refund):
 
 
 def _activate_subscription(order, plan_id):
+    """Start — or extend — the plan the student just paid for.
+
+    Renewing *before* the current period runs out stacks the new period onto the
+    end of the old one. Restarting from today instead would silently confiscate
+    the days already bought: renew a monthly plan with ten days left and you'd
+    have paid twice for thirty days rather than once for forty.
+
+    Deliberately not ``update_or_create``: nothing enforces uniqueness on
+    ``(user, plan)`` at the database level, so a stray duplicate row would make
+    that raise ``MultipleObjectsReturned`` — and this runs *after* the money has
+    moved, inside the settlement transaction. Picking the furthest-dated row is
+    both duplicate-tolerant and the right answer when there is only one. The
+    lock closes the other end of it: the browser handler and the webhook can
+    settle two orders for the same plan concurrently, and without it both would
+    see "no subscription yet" and create one each.
+    """
     plan = PricingPlan.objects.filter(pk=plan_id).first()
     if plan is None:
         return
     now = timezone.now()
     days = _PERIOD_DAYS.get(plan.billing_period, 30)
-    Subscription.objects.update_or_create(
-        user=order.user,
-        plan=plan,
-        defaults={
-            "status": Subscription.Status.ACTIVE,
-            "current_period_start": now,
-            "current_period_end": now + timedelta(days=days),
-        },
+
+    existing = (
+        Subscription.objects.select_for_update()
+        .filter(user=order.user, plan=plan)
+        .order_by(models.F("current_period_end").desc(nulls_last=True))
+        .first()
+    )
+    if existing is None:
+        Subscription.objects.create(
+            user=order.user,
+            plan=plan,
+            status=Subscription.Status.ACTIVE,
+            current_period_start=now,
+            current_period_end=now + timedelta(days=days),
+        )
+        return
+
+    still_running = bool(
+        existing.current_period_end and existing.current_period_end > now
+    )
+    existing.status = Subscription.Status.ACTIVE
+    # Paying again withdraws a pending cancellation — otherwise the renewal
+    # would be billed and then still lapse on the old cancel date.
+    existing.cancel_at = None
+    if not still_running:
+        existing.current_period_start = now
+    existing.current_period_end = (
+        existing.current_period_end if still_running else now
+    ) + timedelta(days=days)
+    existing.save(
+        update_fields=[
+            "status", "cancel_at", "current_period_start",
+            "current_period_end", "updated_at",
+        ]
     )

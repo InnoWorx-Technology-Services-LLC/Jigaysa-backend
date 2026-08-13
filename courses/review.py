@@ -50,8 +50,18 @@ def notify_admins(title, body, link):
 
 
 def submit_for_review(course):
-    """Trainer submits. Validates first, then queues it for an admin."""
+    """Trainer submits. Validates first, then queues it for an admin.
+
+    When the ``course_approval_required`` platform flag is off, a valid
+    submission publishes straight away — that is what the switch means. The
+    ``assert_submittable`` checks still run either way: skipping review is a
+    decision about *who* approves, not licence to publish an empty course.
+    """
+    from core.models import PlatformSetting  # local: avoid an app-load cycle
+
     assert_submittable(course)
+    if not PlatformSetting.get_solo().course_approval_required:
+        return approve(course, note="Auto-published — approval is switched off.")
     course.status = course.Status.PENDING_REVIEW
     course.review_note = ""
     course.save(update_fields=["status", "review_note", "updated_at"])

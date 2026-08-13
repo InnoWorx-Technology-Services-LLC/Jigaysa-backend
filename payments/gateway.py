@@ -42,14 +42,37 @@ class SignatureMismatch(RuntimeError):
     """Raised when a checkout or webhook signature fails verification."""
 
 
+def credentials():
+    """The Razorpay credentials in force: admin-set row first, env as fallback.
+
+    Read live on every call rather than at import, so rotating a key from the
+    admin screen takes effect on the next checkout instead of the next deploy.
+
+    The environment stays the fallback, and that ordering matters both ways: a
+    fresh install works from ``.env`` with no database row, and an operator who
+    cannot reach the admin UI can still fix a broken gateway by setting env vars
+    and restarting. The database wins only when someone has explicitly typed a
+    key into the settings screen — a blank field never shadows the environment.
+    """
+    from core.models import PlatformSetting  # lazy: avoids an app-load cycle
+
+    row = PlatformSetting.get_solo()
+    return (
+        row.razorpay_key_id or settings.RAZORPAY_KEY_ID,
+        row.razorpay_key_secret or settings.RAZORPAY_KEY_SECRET,
+        row.razorpay_webhook_secret or settings.RAZORPAY_WEBHOOK_SECRET,
+    )
+
+
 def is_configured() -> bool:
     """True when both Razorpay keys are present (test or live)."""
-    return bool(settings.RAZORPAY_KEY_ID and settings.RAZORPAY_KEY_SECRET)
+    key_id, key_secret, _ = credentials()
+    return bool(key_id and key_secret)
 
 
 def is_test_mode() -> bool:
     """Razorpay test keys are prefixed ``rzp_test_``; live keys ``rzp_live_``."""
-    return str(settings.RAZORPAY_KEY_ID).startswith("rzp_test_")
+    return str(credentials()[0]).startswith("rzp_test_")
 
 
 def to_minor_units(amount) -> int:
@@ -63,9 +86,11 @@ def from_minor_units(paise) -> Decimal:
 
 
 def _client():
-    if not is_configured():
+    key_id, key_secret, _ = credentials()
+    if not (key_id and key_secret):
         raise GatewayNotConfigured(
-            "Razorpay is not configured (set RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET)."
+            "Razorpay is not configured (set the keys in platform settings, or "
+            "RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET)."
         )
     try:
         import razorpay  # lazy: keeps the SDK an optional dependency
@@ -73,9 +98,7 @@ def _client():
         raise GatewayNotConfigured(
             "The 'razorpay' package is not installed (pip install razorpay)."
         ) from exc
-    return razorpay.Client(
-        auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
-    )
+    return razorpay.Client(auth=(key_id, key_secret))
 
 
 def create_order(amount, receipt, notes=None, currency="INR") -> dict:
@@ -212,10 +235,11 @@ def verify_checkout_signature(razorpay_order_id, razorpay_payment_id, signature)
 
     Razorpay signs ``"{order_id}|{payment_id}"`` with the API *secret*.
     """
-    if not is_configured():
+    _, key_secret, _ = credentials()
+    if not key_secret:
         raise GatewayNotConfigured("Razorpay is not configured.")
     expected = _hmac_sha256(
-        f"{razorpay_order_id}|{razorpay_payment_id}", settings.RAZORPAY_KEY_SECRET
+        f"{razorpay_order_id}|{razorpay_payment_id}", key_secret
     )
     if not hmac.compare_digest(expected, str(signature or "")):
         raise SignatureMismatch("Payment signature verification failed.")
@@ -228,10 +252,11 @@ def verify_webhook_signature(raw_body: bytes, signature: str):
     dashboard), which is deliberately different from the API secret — so a leaked
     webhook secret can't be used to call the API.
     """
-    secret = settings.RAZORPAY_WEBHOOK_SECRET
+    secret = credentials()[2]
     if not secret:
         raise GatewayNotConfigured(
-            "Razorpay webhook secret is not configured (RAZORPAY_WEBHOOK_SECRET)."
+            "Razorpay webhook secret is not configured (set it in platform "
+            "settings, or RAZORPAY_WEBHOOK_SECRET)."
         )
     expected = hmac.new(
         secret.encode("utf-8"), raw_body, hashlib.sha256

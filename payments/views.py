@@ -14,14 +14,14 @@ from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.models import PlatformSetting
 from core.permissions import IsAdmin
 from payments import entitlements, gateway, services
 from payments.models import (
-    CURRENCY_DEFAULT,
     Coupon,
     CoursePrice,
     Invoice,
@@ -58,25 +58,45 @@ def _filter_by(qs, request, param, field=None):
 
 
 class PricingPlanViewSet(viewsets.ModelViewSet):
-    """Platform-access plans (PRD §3.4). Anyone reads; admins author."""
+    """Platform-access plans (PRD §3.4). **Reads are public**; admins author.
+
+    The pricing table is marketing copy — it belongs on the logged-out landing
+    page, same as the course catalogue and categories. Nothing user-specific is
+    serialized here, only what an admin typed into the plan.
+    """
 
     queryset = PricingPlan.objects.all()
     serializer_class = PricingPlanSerializer
     api_roles = ALL_ROLES
     api_roles_by_action = {
+        "list": ("public",), "retrieve": ("public",),
         "create": ADMIN_ONLY, "update": ADMIN_ONLY,
         "partial_update": ADMIN_ONLY, "destroy": ADMIN_ONLY,
     }
 
     def get_queryset(self):
         qs = PricingPlan.objects.all()
-        if self.action == "list" and self.request.query_params.get("active") != "all":
+        if self.action == "list" and not self._admin_wants_retired_plans():
             qs = qs.filter(is_active=True)
         return qs
 
+    def _admin_wants_retired_plans(self):
+        """``?active=all`` is an admin tool, not a public one.
+
+        A withdrawn plan is usually a price that is no longer honoured; leaving
+        the escape hatch open to anonymous callers would put retired prices on
+        the public pricing page. ``retrieve`` stays unfiltered on purpose — a
+        subscriber whose plan was retired must still be able to fetch it by id.
+        """
+        user = self.request.user
+        is_admin = bool(
+            user.is_authenticated and getattr(user, "role", None) == "admin"
+        )
+        return is_admin and self.request.query_params.get("active") == "all"
+
     def get_permissions(self):
         if self.action in ("list", "retrieve"):
-            return [IsAuthenticated()]
+            return [AllowAny()]
         return [IsAdmin()]
 
 
@@ -225,7 +245,9 @@ class OrderViewSet(
         user = request.user
         return Response(
             {
-                "key": settings.RAZORPAY_KEY_ID,
+                # The key the browser opens Checkout with must be the one the
+                # order was created under, not whatever the env happens to hold.
+                "key": gateway.credentials()[0],
                 "razorpay_order_id": payment.gateway_order_id,
                 "amount": rzp_order.get("amount")
                 or gateway.to_minor_units(order.total),
@@ -364,8 +386,10 @@ class SubscriptionViewSet(
         """End the subscription at the end of the period already paid for.
 
         Cancelling does not revoke access mid-period — the student paid for
-        those days. ``cancel_at`` records when it lapses; the entitlement check
-        stops granting anything once ``current_period_end`` passes.
+        those days. ``cancel_at`` records when it lapses, and
+        ``entitlements.active_subscription`` keeps honouring a cancelled row
+        until that moment passes. Buying the plan again before then clears
+        ``cancel_at`` and extends from the existing end date.
         """
         subscription = self.get_object()
         subscription.cancel_at = subscription.current_period_end or timezone.now()
@@ -406,7 +430,7 @@ class BillingSummaryView(APIView):
         return Response(
             {
                 "total_spent": total_spent,
-                "currency": CURRENCY_DEFAULT,
+                "currency": PlatformSetting.get_solo().default_currency,
                 "active_plan": (
                     PricingPlanSerializer(subscription.plan).data
                     if subscription

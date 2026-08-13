@@ -58,6 +58,24 @@ class RegisterSerializer(serializers.ModelSerializer):
         validate_password(value)
         return value
 
+    def validate_role(self, value):
+        """Trainer signup is gated by the ``trainer_self_onboarding`` flag.
+
+        Turned off, a platform onboards trainers by hand: an admin creates the
+        account (or promotes a student), so nobody can list themselves as a
+        mentor by picking a role at the signup form. Students are unaffected.
+        """
+        from core.models import PlatformSetting  # local: avoid an app-load cycle
+
+        if value == Role.TRAINER and not (
+            PlatformSetting.get_solo().trainer_self_onboarding
+        ):
+            raise serializers.ValidationError(
+                "Trainer self-registration is disabled. Contact support to be "
+                "onboarded as a trainer."
+            )
+        return value
+
     def create(self, validated_data):
         password = validated_data.pop("password")
         return User.objects.create_user(password=password, **validated_data)

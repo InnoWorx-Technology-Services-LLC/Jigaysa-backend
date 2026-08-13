@@ -9,6 +9,8 @@ from django.http import HttpResponse
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
+from core.urls import settings_urlpatterns as core_settings_urls
+
 urlpatterns = [
     path("admin/", admin.site.urls),
 
@@ -26,6 +28,7 @@ urlpatterns = [
     # Recordings (§3.11) built but parked — mount when ready:
     # path("api/v1/", include("recordings.urls")),
     path("api/v1/uploads/", include("core.urls")),
+    path("api/v1/", include((core_settings_urls, "core"), namespace="core-settings")),
 
     # OpenAPI schema + interactive docs
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),

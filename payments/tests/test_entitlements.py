@@ -15,7 +15,7 @@ from rest_framework.test import APIClient
 
 from accounts.models import Role, User
 from courses.models import Category, Course, Enrollment
-from payments import entitlements
+from payments import entitlements, services
 from payments.models import Order, PricingPlan, Subscription
 
 pytestmark = pytest.mark.django_db
@@ -105,8 +105,31 @@ def test_expired_period_grants_nothing_even_while_marked_active(student, pro_pla
 
 
 def test_cancelled_subscription_grants_nothing(student, pro_plan):
+    """No ``cancel_at`` means killed outright, not scheduled to lapse."""
     subscribe(student, pro_plan, status_=Subscription.Status.CANCELLED)
     assert entitlements.can_access_paid_courses(student) is False
+
+
+def test_cancelled_but_still_inside_the_paid_period_keeps_paying_out(
+    student, pro_plan
+):
+    """The student was charged for these days; cancelling can't claw them back."""
+    subscription = subscribe(student, pro_plan)
+    subscription.status = Subscription.Status.CANCELLED
+    subscription.cancel_at = subscription.current_period_end
+    subscription.save(update_fields=["status", "cancel_at"])
+
+    assert entitlements.active_subscription(student) == subscription
+    assert entitlements.can_access_paid_courses(student) is True
+
+
+def test_a_cancelled_subscription_stops_once_cancel_at_passes(student, pro_plan):
+    subscription = subscribe(student, pro_plan, days=-1)
+    subscription.status = Subscription.Status.CANCELLED
+    subscription.cancel_at = subscription.current_period_end
+    subscription.save(update_fields=["status", "cancel_at"])
+
+    assert entitlements.active_subscription(student) is None
 
 
 # -- course access ---------------------------------------------------------- #
@@ -216,10 +239,130 @@ def test_plan_list_exposes_the_admin_ticks(student, pro_plan):
     }
 
 
-def test_cancelling_keeps_access_until_the_period_ends(student, pro_plan):
+# -- the public pricing page ------------------------------------------------- #
+
+
+def test_plans_are_readable_logged_out(pro_plan):
+    """The pricing table sits on the landing page, before anyone signs up."""
+    resp = APIClient().get("/api/v1/pricing-plans/")
+
+    assert resp.status_code == status.HTTP_200_OK
+    assert [p["slug"] for p in resp.data["results"]] == ["pro"]
+
+
+def test_retired_plans_stay_off_the_public_list(pro_plan):
+    PricingPlan.objects.create(name="Legacy", slug="legacy", price=199, is_active=False)
+
+    anon = APIClient().get("/api/v1/pricing-plans/?active=all")
+    assert [p["slug"] for p in anon.data["results"]] == ["pro"]
+
+    # …and a student can't reach for the admin escape hatch either.
+    resp = _api(User.objects.create_user(
+        email="s-pub@example.com", password="StrongPass123!", role=Role.STUDENT
+    )).get("/api/v1/pricing-plans/?active=all")
+    assert [p["slug"] for p in resp.data["results"]] == ["pro"]
+
+
+def test_an_admin_can_still_see_retired_plans(pro_plan):
+    PricingPlan.objects.create(name="Legacy", slug="legacy", price=199, is_active=False)
+    admin = User.objects.create_user(
+        email="a-pub@example.com", password="StrongPass123!", role=Role.ADMIN
+    )
+
+    resp = _api(admin).get("/api/v1/pricing-plans/?active=all")
+    assert {p["slug"] for p in resp.data["results"]} == {"pro", "legacy"}
+
+
+def test_writing_a_plan_still_needs_an_admin(student, pro_plan):
+    payload = {"name": "Sneaky", "slug": "sneaky", "price": "1.00"}
+
+    assert APIClient().post(
+        "/api/v1/pricing-plans/", payload, format="json"
+    ).status_code in (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN)
+    assert _api(student).post(
+        "/api/v1/pricing-plans/", payload, format="json"
+    ).status_code == status.HTTP_403_FORBIDDEN
+
+
+def test_cancelling_keeps_access_until_the_period_ends(student, paid_course, pro_plan):
     subscription = subscribe(student, pro_plan)
-    resp = _api(student).post(f"/api/v1/subscriptions/{subscription.id}/cancel/")
+    api = _api(student)
+    resp = api.post(f"/api/v1/subscriptions/{subscription.id}/cancel/")
 
     assert resp.status_code == status.HTTP_200_OK
     subscription.refresh_from_db()
     assert subscription.cancel_at == subscription.current_period_end
+
+    # …and "until the period ends" has to mean the entitlements survive it.
+    assert api.get(
+        f"/api/v1/courses/{paid_course.slug}/curriculum/"
+    ).data["has_access"] is True
+    summary = api.get("/api/v1/billing/summary/").data
+    assert summary["active_plan"]["name"] == "Pro"
+    assert summary["entitlements"]["all_paid_courses"] is True
+
+
+# -- renewals --------------------------------------------------------------- #
+
+
+def _buy(user, plan):
+    """Settle a paid order for ``plan`` the way fulfilment does."""
+    order = Order.objects.create(
+        user=user, status=Order.Status.PAID, total=plan.price
+    )
+    services._activate_subscription(order, plan.pk)
+    return order
+
+
+def test_renewing_early_extends_rather_than_restarting(student, pro_plan):
+    """Ten days left plus a fresh month is forty days, not thirty."""
+    subscription = subscribe(student, pro_plan, days=10)
+    original_end = subscription.current_period_end
+    original_start = subscription.current_period_start
+
+    _buy(student, pro_plan)
+
+    subscription.refresh_from_db()
+    assert subscription.current_period_end == original_end + timedelta(days=30)
+    # Still one continuous subscription — the start date doesn't move.
+    assert subscription.current_period_start == original_start
+    assert Subscription.objects.filter(user=student, plan=pro_plan).count() == 1
+
+
+def test_re_buying_after_a_lapse_starts_a_fresh_period(student, pro_plan):
+    subscription = subscribe(student, pro_plan, days=-5)
+    assert entitlements.can_access_paid_courses(student) is False
+
+    before = timezone.now()
+    _buy(student, pro_plan)
+
+    subscription.refresh_from_db()
+    assert subscription.current_period_start >= before
+    assert subscription.current_period_end >= before + timedelta(days=29)
+    assert entitlements.can_access_paid_courses(student) is True
+
+
+def test_re_buying_withdraws_a_pending_cancellation(student, pro_plan):
+    subscription = subscribe(student, pro_plan, days=10)
+    _api(student).post(f"/api/v1/subscriptions/{subscription.id}/cancel/")
+
+    _buy(student, pro_plan)
+
+    subscription.refresh_from_db()
+    assert subscription.cancel_at is None
+    assert subscription.status == Subscription.Status.ACTIVE
+
+
+def test_duplicate_rows_do_not_break_fulfilment(student, pro_plan):
+    """Nothing enforces uniqueness on (user, plan) — settling must not blow up
+    after the money has already moved."""
+    stale = subscribe(student, pro_plan, days=2)
+    current = subscribe(student, pro_plan, days=20)
+
+    _buy(student, pro_plan)
+
+    current.refresh_from_db()
+    stale.refresh_from_db()
+    # The furthest-dated row is the one that gets extended.
+    assert current.current_period_end > stale.current_period_end
+    assert Subscription.objects.filter(user=student, plan=pro_plan).count() == 2

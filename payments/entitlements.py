@@ -3,13 +3,14 @@
 One place answers "may this user do X because they subscribe?", so course
 access, enrollment and the billing page can never disagree about it.
 
-An entitlement needs **two** things to hold: a subscription row marked active
-*and* a period that has not run out. Both matter, because nothing renews
-subscriptions automatically — a plan bought last year still has
+An entitlement needs **two** things to hold: a subscription row that is still
+paying out *and* a period that has not run out. Both matter, because nothing
+renews subscriptions automatically — a plan bought last year still has
 ``status="active"`` forever, and trusting that flag alone would hand out free
 access indefinitely.
 """
 
+from django.db.models import Q
 from django.utils import timezone
 
 from payments.models import PricingPlan, Subscription
@@ -30,17 +31,30 @@ ENFORCED = frozenset({ALL_PAID_COURSES})
 def active_subscription(user):
     """The user's current subscription, or ``None``.
 
-    "Current" means active *and* inside its paid period. Newest first, so a
-    user who upgraded mid-period gets the plan they most recently bought.
+    Two rows count as current, and the second is the subtle one:
+
+    * ``active`` and inside its paid period — the ordinary case.
+    * ``cancelled`` but with ``cancel_at`` still in the future. Cancelling ends
+      the *renewal*, not the days already paid for; revoking on the cancel click
+      would take back a month the student has already been charged for. The
+      cancel endpoint sets ``cancel_at`` to ``current_period_end``, so this is
+      exactly the unused remainder.
+
+    A ``cancelled`` row with no ``cancel_at`` grants nothing — that is an admin
+    or a support agent killing a subscription outright, not a scheduled lapse.
+
+    Newest first, so a user who upgraded mid-period gets the plan they most
+    recently bought.
     """
     if not getattr(user, "is_authenticated", False):
         return None
     now = timezone.now()
     return (
         Subscription.objects.filter(
-            user=user, status=Subscription.Status.ACTIVE
+            Q(status=Subscription.Status.ACTIVE, current_period_end__gte=now)
+            | Q(status=Subscription.Status.CANCELLED, cancel_at__gte=now),
+            user=user,
         )
-        .filter(current_period_end__gte=now)
         .select_related("plan")
         .order_by("-current_period_start", "-created_at")
         .first()
