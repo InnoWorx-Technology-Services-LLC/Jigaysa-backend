@@ -124,8 +124,9 @@ class PlatformSetting(TimeStampedModel):
         default=Decimal("20.00"),
         validators=[MinValueValidator(Decimal("0")), MaxValueValidator(Decimal("100"))],
         help_text=(
-            "Stored for trainer revenue share. NOTHING COMPUTES PAYOUTS YET — "
-            "changing this does not move money."
+            "The platform's default cut. Trainers keep (100 − this) unless a "
+            "rate is set on their own profile, which overrides it. "
+            "NOTHING COMPUTES PAYOUTS YET — changing this does not move money."
         ),
     )
 

@@ -147,6 +147,15 @@ class TrainerProfileSerializer(serializers.ModelSerializer):
     user_id = serializers.IntegerField(source="user.id", read_only=True)
     full_name = serializers.CharField(source="user.full_name", read_only=True)
     email = serializers.EmailField(source="user.email", read_only=True)
+    effective_revenue_share_pct = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        read_only=True,
+        help_text=(
+            "The cut in force: the trainer's own rate, or the platform default "
+            "when ``revenue_share_pct`` is null. Display this, not the raw field."
+        ),
+    )
 
     class Meta:
         model = TrainerProfile
@@ -162,6 +171,7 @@ class TrainerProfileSerializer(serializers.ModelSerializer):
             "rating_count",
             "is_approved",
             "revenue_share_pct",
+            "effective_revenue_share_pct",
             "created_at",
         )
         read_only_fields = (

@@ -189,9 +189,11 @@ gate the player on it rather than re-deriving from the subscription.
   second subscription; the one with the newest `current_period_start` wins, so a
   mid-period downgrade takes effect immediately and the old plan's remaining
   days are lost.
-- **Platform commission / trainer payouts.** The commission rate is now
-  configurable (§ below) but **nothing computes a payout from it**.
-  `TrainerPayout.platform_fee` is a column only seed data ever fills.
+- **Trainer payouts.** The split is configurable and resolved
+  (`TrainerProfile.effective_revenue_share_pct`), but **nothing computes a
+  payout from it** — no attribution, no ledger, no money out.
+  `TrainerPayout.platform_fee` is a column only seed data ever fills. Plan:
+  [TRAINER_REVENUE_SHARE_PLAN.md](TRAINER_REVENUE_SHARE_PLAN.md).
 
 - **Admin billing endpoints.** The API is student-scoped: orders, invoices,
   subscriptions and payment methods are all filtered to `request.user`, and

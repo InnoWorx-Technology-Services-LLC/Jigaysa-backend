@@ -147,7 +147,9 @@ class Command(BaseCommand):
                 "rating_avg": 4.8,
                 "rating_count": 326,
                 "is_approved": True,
-                "revenue_share_pct": 70,
+                # A negotiated rate, deliberately different from the platform
+                # default, so the demo shows the override actually overriding.
+                "revenue_share_pct": 75,
             },
         )
         LearnerStats.objects.get_or_create(

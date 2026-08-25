@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
 from django.db import models
 
@@ -92,12 +94,46 @@ class TrainerProfile(TimeStampedModel):
     rating_count = models.PositiveIntegerField(default=0)
     is_approved = models.BooleanField(default=False)  # admin onboarding gate
     revenue_share_pct = models.DecimalField(
-        max_digits=5, decimal_places=2, default=70
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text=(
+            "Leave blank so this trainer follows the platform commission — "
+            "changing it platform-wide then moves them too. Set a number only "
+            "to record a rate negotiated with this trainer specifically, which "
+            "pins them and opts them out of platform-wide changes."
+        ),
     )
     payout_account_ref = models.CharField(max_length=255, blank=True)
 
     def __str__(self):
         return f"TrainerProfile<{self.user.email}>"
+
+    @property
+    def effective_revenue_share_pct(self):
+        """The trainer's cut actually in force, as a ``Decimal`` percentage.
+
+        Two fields describe this split from opposite ends, so the reconciliation
+        lives in exactly one place: ``PlatformSetting.platform_commission_percent``
+        is the platform's cut, and ``revenue_share_pct`` is what *this* trainer
+        keeps when a rate was negotiated for them.
+
+        Blank means "follow the platform", **not zero**. Raising the platform
+        commission therefore re-rates every ordinary trainer at once, which is
+        the point of setting it in one place — while a trainer on an agreed rate
+        stays where they are until someone edits their profile.
+
+        A payout run must read this, never either field on its own. Note the
+        consequence for the ledger: because this is live, an earning must
+        snapshot the rate at the moment it is earned, or a later platform-wide
+        change would silently restate historical earnings.
+        """
+        from core.models import PlatformSetting  # local: avoid an app-load cycle
+
+        if self.revenue_share_pct is not None:
+            return self.revenue_share_pct
+        return Decimal("100") - PlatformSetting.get_solo().platform_commission_percent
 
 
 class LearnerStats(TimeStampedModel):

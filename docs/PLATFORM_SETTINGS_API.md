@@ -131,7 +131,7 @@ restart: change it, and the next request uses it.
 | `support_email` | Returned to the frontend |
 | `default_currency` | Stamped onto **new** orders; `billing/summary.currency` |
 | `gst_percent` | Applied to the discounted subtotal in every new quote |
-| `platform_commission_percent` | **Stored only — nothing computes payouts** |
+| `platform_commission_percent` | Sets every trainer's split live, unless pinned per-trainer. Nothing computes payouts yet |
 
 ### Two things that are snapshotted, not retroactive
 
@@ -145,12 +145,36 @@ behaviour: an invoice is a record of what was charged, not a live calculation.
 > ⚠️ `default_currency` does **not** convert prices. Set it to `USD` and a ₹499
 > plan becomes a $499 plan. Change your course prices and pricing plans too.
 
-### Platform commission is not wired up
+### Platform commission is live for every trainer
 
-The field stores a number. Nothing reads it. There is no revenue-share
-calculation anywhere in the codebase — `TrainerPayout.platform_fee` is a column
-that only ever gets a value from seed data. Changing this **does not move
-money**. It is here so the number has one home for when payouts are built.
+`platform_commission_percent` is the platform's cut, so trainers keep
+`100 − commission`. Changing it **re-rates every trainer immediately** — that is
+the point of setting it in one place.
+
+| | |
+|---|---|
+| Commission `20` | every ordinary trainer keeps `80%` |
+| Admin sets commission `30` | **all of them move to `70%` at once**, existing included |
+| New trainer signs up | `revenue_share_pct` stays null → follows the platform |
+| Negotiating with one trainer | set `revenue_share_pct` on their profile — that **pins** them |
+| Undoing a negotiated rate | clear the field back to null → they follow the platform again |
+
+`TrainerProfile.revenue_share_pct` is therefore an **override, not a copy**:
+
+- `null` → follow the platform commission, now and whenever it changes
+- a number → this trainer's agreed rate, immune to platform-wide changes
+
+Blank means "follow the platform", **not zero**. A deliberate `0` is a real rate
+and is honoured as one.
+
+Read `TrainerProfile.effective_revenue_share_pct` — never either field alone.
+
+> ⚠️ **Consequence for payouts:** because the rate is live, an earnings row must
+> snapshot the rate at the moment it is earned. Otherwise raising the commission
+> would silently restate every historical earning. See
+> [TRAINER_REVENUE_SHARE_PLAN.md](TRAINER_REVENUE_SHARE_PLAN.md) §4.
+
+> **Still does not move money.** No payout is computed anywhere.
 
 ---
 
