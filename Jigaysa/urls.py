@@ -25,6 +25,7 @@ urlpatterns = [
     path("api/v1/", include("engagement.urls")),
     path("api/v1/", include("notifications.urls")),
     path("api/v1/", include("payments.urls")),
+    path("api/v1/", include("social.urls")),
     # Recordings (§3.11) built but parked — mount when ready:
     # path("api/v1/", include("recordings.urls")),
     path("api/v1/uploads/", include("core.urls")),

@@ -10,3 +10,6 @@ boto3
 razorpay
 pytest
 pytest-django
+# Social publishing: HTTP calls to LinkedIn/Meta + OAuth token encryption
+requests
+cryptography

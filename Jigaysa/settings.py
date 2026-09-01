@@ -71,6 +71,7 @@ LOCAL_APPS = [
     'notifications',
     'classrooms',
     'analytics',
+    'social',
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
@@ -249,6 +250,48 @@ AWS_S3_DOWNLOAD_EXPIRY = env.int("AWS_S3_DOWNLOAD_EXPIRY", default=3600)  # 1 hr
 AWS_S3_MAX_UPLOAD_BYTES = env.int(
     "AWS_S3_MAX_UPLOAD_BYTES", default=1024 * 1024 * 1024  # 1 GiB
 )
+
+
+# --- Social publishing (PRD §3.3 course promotion) --------------------------
+# OAuth client credentials for the networks a trainer can connect from the
+# panel. Leave a pair blank to disable that network: its card renders "not
+# configured" and the connect endpoint returns 503 rather than failing mid-flow.
+#
+# These are per-deployment infrastructure, not tunable settings — the redirect
+# URI registered in each platform's console is tied to this deployment's domain,
+# so the credentials belong beside it in the environment.
+LINKEDIN_CLIENT_ID = env("LINKEDIN_CLIENT_ID", default="")
+LINKEDIN_CLIENT_SECRET = env("LINKEDIN_CLIENT_SECRET", default="")
+
+# Facebook and Instagram are one Meta app: a single authorization returns every
+# Page the trainer admins plus each Page's linked Instagram Business account.
+META_APP_ID = env("META_APP_ID", default="")
+META_APP_SECRET = env("META_APP_SECRET", default="")
+META_GRAPH_VERSION = env("META_GRAPH_VERSION", default="v21.0")
+
+# Public base URL the networks redirect back to, e.g. https://api.example.com.
+# Must match the redirect URI registered in each platform's console exactly.
+# Blank falls back to the incoming request's host, which is fine in dev and
+# wrong behind a proxy.
+SOCIAL_OAUTH_REDIRECT_BASE = env("SOCIAL_OAUTH_REDIRECT_BASE", default="")
+
+# Fernet key encrypting the stored OAuth tokens (social.crypto). Generate with:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# Never store this in the database it protects. Rotating it makes every stored
+# token undecryptable and forces every trainer to reconnect.
+SOCIAL_TOKEN_KEY = env("SOCIAL_TOKEN_KEY", default="")
+
+# LinkedIn versions its REST API by month and rejects a call without the header.
+# Pinned rather than tracking "latest" so their release schedule cannot break
+# publishing on a random morning; move it forward deliberately, roughly yearly.
+LINKEDIN_API_VERSION = env("LINKEDIN_API_VERSION", default="202405")
+
+# Where a promoted post sends people. Joined to the *origin* of FRONTEND_URL,
+# not to FRONTEND_URL itself, which carries the student app's own path segment
+# (see social.oauth.frontend_origin). Configurable because the public catalog
+# route is a frontend decision and a wrong guess here 404s every click on every
+# post we publish.
+SOCIAL_COURSE_URL_PATH = env("SOCIAL_COURSE_URL_PATH", default="/courses/{slug}")
 
 
 # Internationalization
