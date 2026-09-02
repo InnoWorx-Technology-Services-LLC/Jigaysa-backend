@@ -3,7 +3,7 @@
 from django.urls import path
 from rest_framework.routers import DefaultRouter
 
-from payments import views, webhooks
+from payments import admin_api, views, webhooks
 
 app_name = "payments"
 
@@ -15,6 +15,18 @@ router.register("payment-methods", views.PaymentMethodViewSet, basename="payment
 router.register("orders", views.OrderViewSet, basename="order")
 router.register("invoices", views.InvoiceViewSet, basename="invoice")
 router.register("subscriptions", views.SubscriptionViewSet, basename="subscription")
+
+# Admin console. Platform-wide reads, deliberately separate from the
+# student-scoped resources above — see payments.admin_api.
+router.register(
+    "admin/payments", admin_api.AdminPaymentViewSet, basename="admin-payment"
+)
+router.register(
+    "admin/refunds", admin_api.AdminRefundViewSet, basename="admin-refund"
+)
+router.register(
+    "admin/payouts", admin_api.AdminPayoutViewSet, basename="admin-payout"
+)
 
 urlpatterns = [
     # Gateway → server callback. Unauthenticated by design (verified by HMAC).

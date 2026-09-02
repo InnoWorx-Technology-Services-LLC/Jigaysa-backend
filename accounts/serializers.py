@@ -167,6 +167,8 @@ class TrainerProfileSerializer(serializers.ModelSerializer):
             "expertise",
             "years_experience",
             "hourly_rate",
+            "reviewed_at",
+            "review_note",
             "rating_avg",
             "rating_count",
             "is_approved",
@@ -178,6 +180,73 @@ class TrainerProfileSerializer(serializers.ModelSerializer):
             "rating_avg",
             "rating_count",
             "is_approved",
+            "reviewed_at",
+            "review_note",
             "revenue_share_pct",
             "created_at",
         )
+
+
+# --------------------------------------------------------------------------- #
+# Admin console — the Users page
+# --------------------------------------------------------------------------- #
+
+
+class AdminUserSerializer(serializers.ModelSerializer):
+    """One row in the admin roster.
+
+    Everything here is read-only. Role and suspension change through the
+    dedicated actions, which is what lets them refuse the moves that would lock
+    the platform out of itself — a plain PATCH has nowhere to put that rule.
+    """
+
+    role_label = serializers.CharField(source="get_role_display", read_only=True)
+    date_joined = serializers.DateTimeField(source="created_at", read_only=True)
+    status = serializers.SerializerMethodField()
+    organization_name = serializers.CharField(
+        source="organization.name", read_only=True, default=""
+    )
+
+    class Meta:
+        model = User
+        fields = (
+            "id", "email", "full_name", "role", "role_label", "status",
+            "is_active", "phone", "phone_verified", "organization",
+            "organization_name", "date_joined", "last_login",
+        )
+        read_only_fields = fields
+
+    def get_status(self, obj) -> str:
+        """The word the table prints. One field, so the client doesn't reinvent
+        the mapping from ``is_active`` and get it inconsistent between screens."""
+        return "active" if obj.is_active else "suspended"
+
+
+class UserStatsSerializer(serializers.Serializer):
+    """The counters above the table."""
+
+    total_users = serializers.IntegerField()
+    trainers = serializers.IntegerField()
+    students = serializers.IntegerField()
+    institutions = serializers.IntegerField()
+    admins = serializers.IntegerField()
+    suspended = serializers.IntegerField()
+
+
+class RoleChangeSerializer(serializers.Serializer):
+    """Body of ``PATCH /admin/users/{id}/role/``."""
+
+    role = serializers.ChoiceField(choices=Role.choices)
+
+
+class SuspendSerializer(serializers.Serializer):
+    """Body of ``POST /admin/users/{id}/suspend/``.
+
+    ``reason`` is optional and is shown to the suspended user verbatim, so an
+    admin who writes one is writing user-facing copy. Blank falls back to
+    something neutral rather than an empty notification.
+    """
+
+    reason = serializers.CharField(
+        required=False, allow_blank=True, max_length=500
+    )

@@ -707,3 +707,57 @@ def _activate_subscription(order, plan_id):
             "current_period_end", "updated_at",
         ]
     )
+
+
+def platform_currency() -> str:
+    """The currency admin totals are quoted in.
+
+    Amounts are stored per order, so a deployment that switched currency
+    mid-life has rows in both — this is the label for *today's* numbers, not a
+    conversion. Mixing currencies in one total would be wrong either way; this
+    at least names which one the tiles mean.
+    """
+    from core.models import PlatformSetting  # lazy: avoids an app-load cycle
+
+    return PlatformSetting.get_solo().default_currency
+
+
+def refund_payment(payment, amount=None, reason=""):
+    """Refund one payment, in whole or in part (admin console).
+
+    The per-payment sibling of :func:`request_refund`, which refunds an order's
+    payments in full. Both keep the same ordering — **the row is written before
+    the gateway is called and survives the call failing** — because an unsent
+    refund is a visible debt someone can chase, while a gateway call with no row
+    behind it is money that moved with no record.
+
+    An outstanding or settled refund on the same payment blocks a second one; a
+    previously *failed* one does not, so a retry is still possible. Passing no
+    ``amount`` refunds whatever remains.
+    """
+    already = (
+        Refund.objects.filter(
+            payment=payment,
+            status__in=(Refund.Status.REQUESTED, Refund.Status.PROCESSED),
+        )
+        .aggregate(total=models.Sum("amount"))["total"]
+        or Decimal("0")
+    )
+    remaining = money(payment.amount) - money(already)
+    if remaining <= 0:
+        raise ValidationError("This payment has already been fully refunded.")
+
+    amount = money(amount) if amount is not None else remaining
+    if amount <= 0:
+        raise ValidationError("A refund has to be for more than zero.")
+    if amount > remaining:
+        raise ValidationError(
+            f"That is more than the {remaining} still refundable on this payment."
+        )
+
+    refund = Refund.objects.create(
+        payment=payment, amount=amount, reason=reason[:255]
+    )
+    if not refund.is_sent:
+        send_refund(refund)
+    return refund

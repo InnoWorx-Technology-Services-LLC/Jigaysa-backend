@@ -2,6 +2,7 @@ import random
 
 from django.contrib.auth.tokens import default_token_generator
 from django.core.cache import cache
+from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from rest_framework import generics, mixins, status, viewsets
@@ -319,6 +320,18 @@ class TrainerProfileViewSet(
             pending = self.request.query_params.get("is_approved")
             if pending is not None:
                 qs = qs.filter(is_approved=pending.lower() in ("1", "true", "yes"))
+            # ``?review=pending`` is what the admin console's application queue
+            # asks for, and it is not the same as ``is_approved=false``: a
+            # rejected application is also unapproved, and would otherwise sit
+            # in the queue for ever with nothing to distinguish it from a new
+            # one. Only never-reviewed rows are pending.
+            review = self.request.query_params.get("review", "").strip().lower()
+            if review == "pending":
+                qs = qs.filter(is_approved=False, reviewed_at__isnull=True)
+            elif review == "rejected":
+                qs = qs.filter(is_approved=False, reviewed_at__isnull=False)
+            elif review == "approved":
+                qs = qs.filter(is_approved=True)
             return qs
         return qs.filter(user=self.request.user)
 
@@ -343,12 +356,20 @@ class TrainerProfileViewSet(
         serializer.save()
         return Response(serializer.data)
 
-    def _set_approved(self, request, approved):
+    def _set_approved(self, request, approved, note=""):
         if not _is_admin(request.user):
             raise PermissionDenied("Only an admin can change trainer approval.")
         profile = self.get_object()
         profile.is_approved = approved
-        profile.save(update_fields=["is_approved", "updated_at"])
+        # Stamped on every decision, approve or reject, so the queue can tell a
+        # reviewed application from a new one. See ``get_queryset``.
+        profile.reviewed_at = timezone.now()
+        profile.review_note = note
+        profile.save(
+            update_fields=[
+                "is_approved", "reviewed_at", "review_note", "updated_at",
+            ]
+        )
         notify(
             profile.user,
             NotificationCategory.SYSTEM,
@@ -359,7 +380,7 @@ class TrainerProfileViewSet(
             body=(
                 "Students can now find you and book 1:1 sessions."
                 if approved
-                else "Your profile is no longer listed for 1:1 bookings."
+                else note or "Your profile is no longer listed for 1:1 bookings."
             ),
             link="/trainer/settings",
         )
@@ -374,3 +395,18 @@ class TrainerProfileViewSet(
     def unapprove(self, request, pk=None):
         """Admin: remove them from the mentor list. Existing bookings stand."""
         return self._set_approved(request, False)
+
+    @action(detail=True, methods=["post"])
+    def reject(self, request, pk=None):
+        """Admin: decline a trainer application.
+
+        Mechanically the same flag as ``unapprove`` — what differs is intent,
+        and the queue. Rejecting stamps ``reviewed_at``, which is what takes the
+        application out of the pending list instead of leaving it there for the
+        next admin to look at again.
+
+        The optional ``note`` is shown to the applicant verbatim; declining
+        someone without telling them why is how a support ticket starts.
+        """
+        note = str(request.data.get("note", "") or "")[:1000]
+        return self._set_approved(request, False, note=note)

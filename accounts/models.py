@@ -93,6 +93,13 @@ class TrainerProfile(TimeStampedModel):
     rating_avg = models.DecimalField(max_digits=3, decimal_places=2, default=0)
     rating_count = models.PositiveIntegerField(default=0)
     is_approved = models.BooleanField(default=False)  # admin onboarding gate
+    #: When an admin last decided either way. This is what separates "not yet
+    #: reviewed" from "reviewed and declined" — both are ``is_approved=False``,
+    #: and without it a rejected application sits in the pending queue for ever
+    #: because nothing distinguishes it from a brand-new one.
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    #: The admin's note on that decision, shown back to the trainer.
+    review_note = models.TextField(blank=True)
     revenue_share_pct = models.DecimalField(
         max_digits=5,
         decimal_places=2,

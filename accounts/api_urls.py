@@ -7,13 +7,16 @@ the nonsensical ``/auth/trainer-profiles/`` path.
 
 from rest_framework.routers import DefaultRouter
 
-from accounts import views
+from accounts import admin_api, views
 
 app_name = "accounts_api"
 
 router = DefaultRouter()
 router.register(
     "trainer-profiles", views.TrainerProfileViewSet, basename="trainer-profile"
+)
+router.register(
+    "admin/users", admin_api.AdminUserViewSet, basename="admin-user"
 )
 
 urlpatterns = router.urls

@@ -11,7 +11,9 @@ from payments.models import (
     Payment,
     PaymentMethod,
     PricingPlan,
+    Refund,
     Subscription,
+    TrainerPayout,
 )
 
 
@@ -179,3 +181,113 @@ class RazorpayVerifySerializer(serializers.Serializer):
 class CouponValidateSerializer(serializers.Serializer):
     code = serializers.CharField()
     items = OrderItemInputSerializer(many=True)
+
+
+# --------------------------------------------------------------------------- #
+# Admin console — the Payments page
+# --------------------------------------------------------------------------- #
+
+
+class AdminPaymentSerializer(serializers.ModelSerializer):
+    """One row in the platform-wide transaction table.
+
+    Carries the payer inline. The table's whole job is "who paid what", and
+    making the client fetch a user per row to answer that is how a 20-row page
+    becomes 21 requests.
+    """
+
+    payer_email = serializers.EmailField(source="order.user.email", read_only=True)
+    payer_name = serializers.CharField(
+        source="order.user.full_name", read_only=True, default=""
+    )
+    currency = serializers.CharField(source="order.currency", read_only=True)
+    refunded_amount = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Payment
+        fields = (
+            "id", "order", "payer_email", "payer_name", "gateway",
+            "gateway_order_id", "gateway_payment_id", "amount", "currency",
+            "method", "status", "refunded_amount", "paid_at", "created_at",
+        )
+        read_only_fields = fields
+
+    def get_refunded_amount(self, obj) -> str:
+        """Settled refunds only — a requested one is an intention, not a
+        movement, and showing it as returned money overstates the refund column
+        on every row that is still in flight."""
+        total = sum(
+            r.amount for r in obj.refunds.all()
+            if r.status == Refund.Status.PROCESSED
+        )
+        return str(total)
+
+
+class PaymentSummarySerializer(serializers.Serializer):
+    """The four tiles. See ``AdminPaymentViewSet.summary`` for the definitions."""
+
+    gross_volume = serializers.DecimalField(max_digits=14, decimal_places=2)
+    refunds = serializers.DecimalField(max_digits=14, decimal_places=2)
+    pending = serializers.DecimalField(max_digits=14, decimal_places=2)
+    net = serializers.DecimalField(max_digits=14, decimal_places=2)
+    currency = serializers.CharField()
+
+
+class AdminRefundSerializer(serializers.ModelSerializer):
+    """A refund, with enough of its payment to be actionable in a queue."""
+
+    payer_email = serializers.EmailField(
+        source="payment.order.user.email", read_only=True
+    )
+    order_id = serializers.IntegerField(source="payment.order_id", read_only=True)
+    is_sent = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = Refund
+        fields = (
+            "id", "payment", "order_id", "payer_email", "amount", "reason",
+            "status", "gateway_refund_id", "is_sent", "processed_at",
+            "created_at",
+        )
+        read_only_fields = fields
+
+
+class RefundCreateSerializer(serializers.Serializer):
+    """Body of ``POST /admin/refunds/``.
+
+    Only successful payments can be refunded — there is nothing to send back
+    from one that never captured, and letting an admin try produces a gateway
+    error where a validation message belongs.
+    """
+
+    payment = serializers.PrimaryKeyRelatedField(queryset=Payment.objects.all())
+    amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, required=False, allow_null=True,
+        help_text="Omit to refund everything still refundable on this payment.",
+    )
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=255)
+
+    def validate_payment(self, payment):
+        if payment.status != Payment.Status.SUCCESS:
+            raise serializers.ValidationError(
+                "Only a captured payment can be refunded."
+            )
+        return payment
+
+
+class AdminPayoutSerializer(serializers.ModelSerializer):
+    """A row in the trainer payout queue. Read-only — nothing writes these yet."""
+
+    trainer_email = serializers.EmailField(source="trainer.email", read_only=True)
+    trainer_name = serializers.CharField(
+        source="trainer.full_name", read_only=True, default=""
+    )
+
+    class Meta:
+        model = TrainerPayout
+        fields = (
+            "id", "trainer", "trainer_email", "trainer_name", "period_start",
+            "period_end", "gross", "platform_fee", "net", "status", "paid_at",
+            "created_at",
+        )
+        read_only_fields = fields

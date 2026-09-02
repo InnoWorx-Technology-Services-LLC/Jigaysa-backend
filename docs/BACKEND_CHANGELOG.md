@@ -7,6 +7,96 @@ Nothing here is committed yet — it is all in the working tree.
 
 ---
 
+## Admin console — Users, Payments and Reports
+
+Three admin pages that had **no backend at all**. Each has its own reference:
+`docs/ADMIN_USERS_API.md`, `docs/ADMIN_PAYMENTS_API.md`,
+`docs/ADMIN_REPORTS_API.md`.
+
+### Users — `docs/ADMIN_USERS_API.md`
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/admin/users/` | roster: **paginated**, `?search=` `?role=` `?status=` |
+| `GET /api/v1/admin/users/stats/` | the four counters, one grouped query |
+| `PATCH /api/v1/admin/users/{id}/role/` | the Change role menu |
+| `POST /api/v1/admin/users/{id}/suspend/` · `/reactivate/` | suspension |
+| `POST /api/v1/trainer-profiles/{id}/reject/` | **new** — the Reject button |
+
+Two `409`s guard the console against locking the platform out of itself: you
+cannot suspend or demote **yourself**.
+
+> **`?review=pending` is not `?is_approved=false`.** A rejected application is
+> also unapproved, so filtering on the flag alone left every rejection in the
+> queue for ever. `reject` stamps `reviewed_at`, and that is what takes it out.
+> Migration: `accounts/0008`.
+
+**Suspension takes effect on the next sign-in, not mid-session** — it is a lock
+on the door, not a bouncer.
+
+### Payments — `docs/ADMIN_PAYMENTS_API.md`
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/admin/payments/` | platform-wide transactions, **paginated** |
+| `GET /api/v1/admin/payments/summary/` | gross / refunds / pending / net |
+| `GET`+`POST /api/v1/admin/refunds/` | the refund queue, and issuing one |
+| `GET /api/v1/admin/payouts/` | trainer payout queue (read-only) |
+
+> **Do not build this page on `/orders/`.** That endpoint scopes reads to the
+> caller *including for admins*, so an admin sees their own test orders and
+> concludes the platform has no revenue. Rather than weaken a student-facing
+> endpoint with an `if admin` branch, the wide reads live behind `IsAdmin` in
+> `payments/admin_api.py`.
+
+`summary` honours the same filters as the table — tiles that ignore the filter
+beside a table that honours it is the classic dashboard lie. Partial refunds are
+supported; omitting `amount` refunds the remainder.
+
+### Reports — `docs/ADMIN_REPORTS_API.md`
+
+`GET /api/v1/admin/reports/` `summary/`, `trends/`, `users-by-role/`,
+`attendance/` (the last **paginated**). The `analytics` app was an empty shell
+and was not mounted at all; it now is.
+
+Trend series are **dense** — every month in the window, gaps as explicit zeros.
+A sparse aggregate charted directly draws a line from November to January and
+hides the dip. Both series share one month range, so index *n* is the same month
+in each.
+
+Attendance rate is `null`, never `0`, when no register has been taken. They mean
+opposite things and colouring the first as the second paints a healthy batch as
+a total failure.
+
+### 🐛 Found while building: MySQL has no timezone tables
+
+`CONVERT_TZ` returns `NULL` on this server and `mysql.time_zone` is empty, so
+any `__date` lookup or `TruncMonth` on a timezone-aware column **silently
+matches nothing** — no error, just an honest-looking chart of all zeros. The
+first version of the trends endpoint read empty for exactly this reason.
+
+Both new modules now compare **aware datetimes computed in Python** instead, so
+they do not depend on that data load. No pre-existing code used `__date` or
+`Trunc*`, so nothing else was affected — but anything added later will hit it.
+Worth running `mysql_tzinfo_to_sql` on the server regardless.
+
+### Pagination
+
+Every list endpoint above uses the platform default: `?page`, `?page_size`
+(default 20, max 100), and a `{count, next, previous, results}` envelope. **A
+client that does `resp.data[0]` will break on the first full page.**
+
+### 🙈 Gaps worth knowing
+
+- **Nothing generates trainer payouts.** `TrainerPayout` is written by no code
+  path, so the payout queue is empty and the Reports "Payouts" tile reads 0 on a
+  platform with real revenue. Endpoint and shape are real; the data is not.
+- **No bulk actions, no user deletion, no audit log** on Users.
+- **No reconciliation, no export, no cohort analysis** — all three appear in
+  page blurbs and none is computed.
+
+---
+
 ## Course promotion — the Promote wizard, end to end
 
 The **Schedule** step now has a backend. Templates, per-network copy, campaigns,
