@@ -1,8 +1,14 @@
-"""Media upload (direct-to-S3 presign) routes. Mounted at ``/api/v1/uploads/``."""
+"""Core routes: media presign, platform settings, and the Institutions admin.
+
+Three groups mounted at three different prefixes by ``Jigaysa.urls`` — presign
+under ``/api/v1/uploads/``, the rest at the API root. Splitting them here keeps
+that mapping in one file instead of spread across the project urlconf.
+"""
 
 from django.urls import path
+from rest_framework.routers import DefaultRouter
 
-from core import views
+from core import admin_api, views
 
 app_name = "core"
 
@@ -25,3 +31,12 @@ settings_urlpatterns = [
         name="platform-settings-public",
     ),
 ]
+
+#: The admin console's Institutions page. Also mounted at the API root.
+_org_router = DefaultRouter()
+_org_router.register(
+    "admin/organizations",
+    admin_api.AdminOrganizationViewSet,
+    basename="admin-organization",
+)
+organization_urlpatterns = _org_router.urls

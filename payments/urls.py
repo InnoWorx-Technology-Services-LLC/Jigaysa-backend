@@ -3,7 +3,7 @@
 from django.urls import path
 from rest_framework.routers import DefaultRouter
 
-from payments import admin_api, views, webhooks
+from payments import admin_api, earnings_api, views, webhooks
 
 app_name = "payments"
 
@@ -39,6 +39,32 @@ urlpatterns = [
         "billing/summary/",
         views.BillingSummaryView.as_view(),
         name="billing-summary",
+    ),
+    # --- The trainer's Earnings page (payments.earnings_api) -------------- #
+    path(
+        "trainer/earnings/summary/",
+        earnings_api.EarningsSummaryView.as_view(),
+        name="earnings-summary",
+    ),
+    path(
+        "trainer/earnings/trend/",
+        earnings_api.EarningsTrendView.as_view(),
+        name="earnings-trend",
+    ),
+    path(
+        "trainer/earnings/payouts/",
+        earnings_api.TrainerPayoutListView.as_view(),
+        name="earnings-payouts",
+    ),
+    path(
+        "trainer/earnings/bank-account/",
+        earnings_api.BankAccountView.as_view(),
+        name="earnings-bank-account",
+    ),
+    path(
+        "trainer/earnings/",
+        earnings_api.EarningsLedgerView.as_view(),
+        name="earnings-ledger",
     ),
     *router.urls,
 ]

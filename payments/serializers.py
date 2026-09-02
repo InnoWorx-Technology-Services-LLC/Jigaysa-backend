@@ -13,8 +13,11 @@ from payments.models import (
     PricingPlan,
     Refund,
     Subscription,
+    TrainerEarning,
     TrainerPayout,
 )
+from accounts.models import TrainerProfile
+from analytics.serializers import TrendPointSerializer
 
 
 class PricingPlanSerializer(serializers.ModelSerializer):
@@ -291,3 +294,122 @@ class AdminPayoutSerializer(serializers.ModelSerializer):
             "created_at",
         )
         read_only_fields = fields
+
+
+# --------------------------------------------------------------------------- #
+# The trainer's Earnings page
+# --------------------------------------------------------------------------- #
+
+
+class EarningsSummarySerializer(serializers.Serializer):
+    """The four tiles plus the revenue split.
+
+    ``share_pct`` and ``platform_fee_pct`` always sum to 100 and are computed
+    server-side, so the two bars cannot disagree with each other or with what
+    the ledger actually used.
+    """
+
+    this_month = serializers.DecimalField(max_digits=14, decimal_places=2)
+    lifetime = serializers.DecimalField(max_digits=14, decimal_places=2)
+    pending_payout = serializers.DecimalField(max_digits=14, decimal_places=2)
+    average_per_course = serializers.DecimalField(max_digits=14, decimal_places=2)
+    earning_courses = serializers.IntegerField()
+    share_pct = serializers.DecimalField(max_digits=5, decimal_places=2)
+    platform_fee_pct = serializers.DecimalField(max_digits=5, decimal_places=2)
+    currency = serializers.CharField()
+
+
+class EarningsTrendSerializer(serializers.Serializer):
+    """The twelve-month chart. Dense — every month, gaps as explicit zeros."""
+
+    months = serializers.IntegerField()
+    earnings = TrendPointSerializer(many=True)
+    currency = serializers.CharField()
+
+
+class EarningLineSerializer(serializers.ModelSerializer):
+    """One line of the ledger — the evidence behind a total.
+
+    ``share_pct`` is the rate **at the moment of sale**, not today's. That is
+    the whole point of snapshotting it: a rate change in April must not restate
+    what March paid.
+    """
+
+    course_title = serializers.CharField(
+        source="course.title", read_only=True, default=""
+    )
+    payout_status = serializers.CharField(
+        source="payout.status", read_only=True, default=""
+    )
+
+    class Meta:
+        model = TrainerEarning
+        fields = (
+            "id", "order", "course", "course_title", "gross", "share_pct",
+            "platform_fee", "net", "currency", "status", "payout",
+            "payout_status", "earned_at", "reversed_at", "note",
+        )
+        read_only_fields = fields
+
+
+class TrainerPayoutSerializer(serializers.ModelSerializer):
+    """A payout as the trainer sees it. ``pending`` means owed, not sent."""
+
+    line_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = TrainerPayout
+        fields = (
+            "id", "period_start", "period_end", "gross", "platform_fee",
+            "net", "status", "paid_at", "line_count", "created_at",
+        )
+        read_only_fields = fields
+
+
+class BankAccountSerializer(serializers.ModelSerializer):
+    """The "Bank account on file" card. Never a full account number."""
+
+    bank_name = serializers.CharField(source="payout_bank_name", read_only=True)
+    account_last4 = serializers.CharField(
+        source="payout_account_last4", read_only=True
+    )
+    account_type = serializers.CharField(
+        source="payout_account_type", read_only=True
+    )
+    account_holder = serializers.CharField(
+        source="payout_account_holder", read_only=True
+    )
+    is_set = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TrainerProfile
+        fields = (
+            "bank_name", "account_last4", "account_type", "account_holder",
+            "is_set",
+        )
+        read_only_fields = fields
+
+    def get_is_set(self, obj) -> bool:
+        """One flag, so the card doesn't guess from four possibly-blank strings."""
+        return bool(obj.payout_bank_name and obj.payout_account_last4)
+
+
+class BankAccountUpdateSerializer(serializers.Serializer):
+    """Body of ``PUT /trainer/earnings/bank-account/``.
+
+    Takes the **last four digits only**. A full account number is refused, not
+    truncated — silently keeping four digits of a number someone believed they
+    had registered is worse than telling them we do not take it.
+    """
+
+    bank_name = serializers.CharField(max_length=120)
+    account_last4 = serializers.CharField(max_length=4, min_length=4)
+    account_type = serializers.CharField(max_length=20, allow_blank=True, default="")
+    account_holder = serializers.CharField(max_length=255, allow_blank=True, default="")
+
+    def validate_account_last4(self, value):
+        if not value.isdigit():
+            raise serializers.ValidationError(
+                "Enter the last four digits of the account number."
+            )
+        return value

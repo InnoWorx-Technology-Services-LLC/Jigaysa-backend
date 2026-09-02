@@ -293,6 +293,11 @@ LINKEDIN_API_VERSION = env("LINKEDIN_API_VERSION", default="202405")
 # post we publish.
 SOCIAL_COURSE_URL_PATH = env("SOCIAL_COURSE_URL_PATH", default="/courses/{slug}")
 
+# How long a trainer's earning must age before a payout can sweep it up. Covers
+# the window in which a refund is likely, so a reversal lands on money that has
+# not left yet. A business decision, not a constant — see payments.earnings.
+TRAINER_PAYOUT_HOLD_DAYS = env.int("TRAINER_PAYOUT_HOLD_DAYS", default=7)
+
 
 # Internationalization
 # https://docs.djangoproject.com/en/6.0/topics/i18n/

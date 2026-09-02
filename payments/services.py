@@ -283,6 +283,13 @@ def _settle(order, payment):
             used_count=order.coupon.used_count + 1
         )
     _fulfil_order(order)
+
+    # The trainer's share is recognised here, at capture — see
+    # ``payments.earnings`` for why, and for the hold period that keeps a
+    # refund inside the window from chasing money that already left.
+    from payments import earnings  # lazy: earnings imports back into services
+
+    earnings.record_order_earnings(order)
     return payment
 
 
@@ -595,6 +602,14 @@ def _mark_refund_processed(refund, remote):
         order.status = Order.Status.REFUNDED
         order.save(update_fields=["status", "updated_at"])
     Invoice.objects.filter(order=order).update(status=Invoice.Status.REFUNDED)
+
+    # The trainer did not keep money the student got back. Reversed, never
+    # deleted — a March statement has to still say what March was.
+    from payments import earnings  # lazy: earnings imports back into services
+
+    earnings.reverse_order_earnings(
+        order, note=f"Refund #{refund.pk} processed."
+    )
     return refund
 
 

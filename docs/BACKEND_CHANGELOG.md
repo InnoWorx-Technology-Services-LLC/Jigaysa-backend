@@ -7,6 +7,152 @@ Nothing here is committed yet — it is all in the working tree.
 
 ---
 
+## Admin console — Institutions
+
+Organisations could only be created in Django admin, and the user&rarr;organisation
+link was settable nowhere else &mdash; which is why the platform has had **zero
+organisations** since launch. Reference: `docs/ADMIN_INSTITUTIONS_API.md`.
+
+### ✅ What you can call now
+
+| Endpoint | Purpose |
+|---|---|
+| `GET`/`POST /api/v1/admin/organizations/` | list (**paginated**, `?search=` `?type=` `?status=`) and create |
+| `PATCH`/`DELETE /api/v1/admin/organizations/{id}/` | rename, or deactivate |
+| `POST /api/v1/admin/organizations/{id}/activate/` | undo a deactivation |
+| `GET /api/v1/admin/organizations/{id}/members/` | the roll, **paginated**, `?role=` |
+| `POST /api/v1/admin/organizations/{id}/members/add/` | attach existing users |
+| `DELETE /api/v1/admin/organizations/{id}/members/{user_id}/` | detach one |
+
+Onboarding is now three API calls instead of three Django-admin visits: create
+the org, promote whoever runs it via the existing role endpoint, attach them.
+
+### ⚠️ Membership is not a role
+
+Adding someone to an institution **never changes what they may do**. A student at
+a college and the administrator who bought the seats are both members; only the
+second has `role: "institution"`, and that stays a separate call. Bundling the
+two would make "add 400 students" silently able to mint 400 institution accounts.
+
+### 🐛 Fixed on the way in: a duplicate name was a 500
+
+`Organization.save()` derives a slug with `slugify(name)` and no de-duplication,
+while the column is `unique=True`. Two institutions genuinely called "St. Xavier
+College" &mdash; or any two names that slugify the same &mdash; would raise an
+IntegrityError and surface as a server error.
+
+The API now generates the slug explicitly and suffixes a counter
+(`st-xavier-college-2`), so the model fallback never fires. Duplicate *names* are
+rejected with a clean `400`. **The model itself is unchanged**, so anything
+creating an `Organization` outside this endpoint still has the sharp edge.
+
+### Two deliberate refusals
+
+- **Renaming does not re-slug.** The slug is in URLs; re-slugging would break
+  every link already shared. A rename is a label change, not a new tenant.
+- **DELETE deactivates, never removes.** Courses, batches and classrooms hang off
+  the row and members point at it, so deleting would either cascade through a
+  course catalogue or orphan the roll. Same rule as user suspension, so the
+  console has one mental model rather than two.
+
+### 🙈 Gaps
+
+No user creation or invite from this screen (you attach existing accounts), no
+CSV roll import, no per-institution seat limits or billing, and `role:
+"institution"` still does not scope what such a user can see. No migration &mdash;
+the model already existed, only its API was missing.
+
+---
+
+## Trainer earnings — the payout gap, closed
+
+`TrainerPayout` was a table nothing ever wrote to, so **every earnings figure on
+three screens read zero regardless of revenue**: the trainer Earnings page, the
+admin payout queue, and the Reports "Payouts" tile. There is now a ledger behind
+them. Reference: `docs/TRAINER_EARNINGS_API.md`.
+
+### The missing piece: a ledger, not a running total
+
+New `TrainerEarning` — one line per paid order item, written the moment an order
+settles. Payout rows are period aggregates and cannot say *which sales* made a
+figure, tell a reversal from a sale that never happened, or stop an order being
+counted twice. A ledger can, and three properties make it safe to compute money
+from:
+
+- **Idempotent** — one row per `order_item`, unique-constrained. Settlement runs
+  from both the verify call *and* the webhook, so double-recording had to be
+  impossible rather than unlikely.
+- **Immutable** — a refund adds a `reversed` state; it never edits amounts.
+- **Self-describing** — `share_pct` is snapshotted at the sale, so changing a
+  trainer's rate in April cannot restate what March paid.
+
+### What a trainer actually earns
+
+`gross` is the line amount **net of coupon discount and excluding GST**:
+
+- **GST is not split.** It is the government's; dividing it would have the
+  platform and the trainer sharing money belonging to neither.
+- **A coupon is nobody's revenue**, and it is allocated across lines *in
+  proportion to their amounts* — a coupon applies to the order, not to one
+  course. Charging it all to the first line would underpay one trainer and
+  overpay another on the same order.
+- **Plan purchases earn nobody.** A platform subscription is not a sale of any
+  one trainer's work, and inventing an attribution would be worse than none.
+
+### When — and the hold that makes it safe
+
+**Recognised at capture.** Waiting out a refund window before showing anything
+makes the page lie for a week to a trainer who just made a sale.
+
+The refund risk is handled at the *payout* boundary instead, where it matters: an
+earning must age `TRAINER_PAYOUT_HOLD_DAYS` (default 7, configurable) before a
+payout can sweep it. So a refund inside the window reverses a line that has not
+been committed anywhere — and the trainer still saw their sale on the day.
+
+### ✅ What you can call now
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/trainer/earnings/summary/` | four tiles + the revenue split |
+| `GET /api/v1/trainer/earnings/trend/` | the twelve-month chart, dense |
+| `GET /api/v1/trainer/earnings/` | the ledger lines, **paginated** |
+| `GET /api/v1/trainer/earnings/payouts/` | payouts, **paginated** |
+| `GET`/`PUT /api/v1/trainer/earnings/bank-account/` | the bank card |
+
+### 🔁 Needs a cron entry
+
+    python manage.py generate_trainer_payouts        # monthly
+
+Without it `pending_payout` grows for ever and the Payouts list stays empty. The
+page copy promises payouts on the last day of each month; a cron entry on that
+day is what makes it true. Safe to run twice.
+
+### ⚠️ Two things to label honestly in the UI
+
+1. **A payout row means "owed", not "sent".** There is no payout processor
+   integration — the job records what is owed; nothing moves money. A payout
+   becomes `paid` only when a human marks it after settling by other means.
+2. **The bank card records where a trainer *says* payouts should go.** It
+   **refuses a full account number** (`account_last4` must be exactly four
+   digits; longer is a `400`, not a silent truncation). Storing a real number
+   means holding a payout instrument — encryption at rest, an access trail, a
+   breach story — with no processor to hand it to, so the only thing it would
+   achieve is the liability. A trainer who thinks they have connected a bank
+   account, and has not, finds out at the worst possible moment.
+
+### Config
+
+New: `TRAINER_PAYOUT_HOLD_DAYS` (default 7). Migrations:
+`payments/0005_trainerearning`, `accounts/0009` (four bank-display fields on
+`TrainerProfile`). No new packages.
+
+### Known limitation
+
+**A partial refund reverses the whole earning line**, which over-corrects. Fine
+while partial refunds are rare; worth fixing before they are not.
+
+---
+
 ## Trainer console — Assignments and Analytics
 
 The two trainer pages that had nothing behind their dashboard layer. References:

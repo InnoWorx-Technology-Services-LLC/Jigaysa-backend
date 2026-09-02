@@ -112,7 +112,22 @@ class TrainerProfile(TimeStampedModel):
             "pins them and opts them out of platform-wide changes."
         ),
     )
+    #: The payout processor's own handle for this trainer's bank account, once
+    #: such an integration exists. Empty today because none does.
     payout_account_ref = models.CharField(max_length=255, blank=True)
+
+    # --- Bank account, as displayed on the Earnings page ------------------- #
+    #
+    # Deliberately **not** a full account number. Holding one means holding a
+    # payout instrument, which needs encryption at rest, an access trail and a
+    # reason to exist — and there is no payout processor to hand it to, so the
+    # only thing storing it would achieve is the liability. These four fields
+    # are what the page renders ("HDFC •••• 8821 · Savings · Dr. Kapoor"); the
+    # real number belongs at the processor, keyed by ``payout_account_ref``.
+    payout_bank_name = models.CharField(max_length=120, blank=True)
+    payout_account_last4 = models.CharField(max_length=4, blank=True)
+    payout_account_type = models.CharField(max_length=20, blank=True)
+    payout_account_holder = models.CharField(max_length=255, blank=True)
 
     def __str__(self):
         return f"TrainerProfile<{self.user.email}>"

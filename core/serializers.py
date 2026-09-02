@@ -1,9 +1,12 @@
 """Serializers for the media-upload presign endpoints and platform settings."""
 
+from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
-from core.models import PlatformSetting
+from core.models import Organization, PlatformSetting
 from core.storage import UPLOAD_PURPOSES
+
+User = get_user_model()
 
 
 class PresignUploadSerializer(serializers.Serializer):
@@ -123,3 +126,78 @@ class PublicPlatformSettingSerializer(serializers.ModelSerializer):
 
     def get_flags(self, obj) -> dict:
         return obj.flags()
+
+
+# --- admin console: institutions -------------------------------------------- #
+
+
+class OrganizationSerializer(serializers.ModelSerializer):
+    """One row of the Institutions table.
+
+    ``member_count`` and ``course_count`` are annotated by the view, not
+    computed here — a serializer that queries per row turns a 20-row page into
+    41 queries, and this table exists to be scanned.
+    """
+
+    member_count = serializers.IntegerField(read_only=True)
+    course_count = serializers.IntegerField(read_only=True)
+    type_label = serializers.CharField(source="get_type_display", read_only=True)
+    status = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Organization
+        fields = (
+            "id", "name", "slug", "type", "type_label", "is_active", "status",
+            "member_count", "course_count", "created_at", "updated_at",
+        )
+        read_only_fields = fields
+
+    def get_status(self, obj) -> str:
+        """The word the table prints, so two screens can't disagree about what
+        to call the same row."""
+        return "active" if obj.is_active else "inactive"
+
+
+class OrganizationWriteSerializer(serializers.ModelSerializer):
+    """Body of create and update.
+
+    ``slug`` is deliberately absent: it is derived from the name on create and
+    then **frozen**. It appears in URLs, so re-slugging on a rename would break
+    every link already shared — and a rename is a label change, not a new
+    tenant.
+    """
+
+    class Meta:
+        model = Organization
+        fields = ("name", "type", "is_active")
+
+    def validate_name(self, value):
+        name = value.strip()
+        if not name:
+            raise serializers.ValidationError("Give the institution a name.")
+        clash = Organization.objects.filter(name__iexact=name)
+        if self.instance:
+            clash = clash.exclude(pk=self.instance.pk)
+        if clash.exists():
+            raise serializers.ValidationError(
+                "An organization with that name already exists."
+            )
+        return name
+
+
+class OrganizationMemberSerializer(serializers.ModelSerializer):
+    """A person inside an institution.
+
+    Read-only on purpose. Membership is changed through the organisation's own
+    add/remove actions, and role through the users endpoint — neither is a
+    field somebody should be able to flip by PATCHing a member row.
+    """
+
+    role_label = serializers.CharField(source="get_role_display", read_only=True)
+
+    class Meta:
+        model = User
+        fields = (
+            "id", "email", "full_name", "role", "role_label", "is_active",
+        )
+        read_only_fields = fields

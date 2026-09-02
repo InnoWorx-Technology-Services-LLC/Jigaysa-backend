@@ -381,3 +381,91 @@ class TrainerPayout(TimeStampedModel):
 
     def __str__(self):
         return f"Payout {self.trainer} {self.net} [{self.status}]"
+
+
+class TrainerEarning(TimeStampedModel):
+    """One trainer's share of one paid order line (PRD §3.3, §3.14).
+
+    A **ledger line, not a running total.** Payouts are period aggregates and
+    cannot answer "which sales made this figure", tell a reversal from a sale
+    that never happened, or stop the same order being counted twice. This can.
+
+    The three properties that make it safe to compute money from:
+
+    * **Idempotent.** One row per ``order_item``, enforced by a unique
+      constraint. Settlement runs from both the verify call and the webhook, so
+      "record it again" has to be impossible rather than unlikely.
+    * **Immutable once written.** A refund adds a ``reversed`` state; it never
+      edits the original amounts. What a trainer earned in March stays what
+      they earned in March even if the rate changes in April.
+    * **Self-describing.** ``share_pct`` is snapshotted at the moment of sale,
+      so recomputing history is never necessary — and never possible by
+      accident. See ``TrainerProfile.effective_revenue_share_pct``.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Earned"
+        REVERSED = "reversed", "Reversed (refunded)"
+
+    trainer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="earnings",
+    )
+    order = models.ForeignKey(
+        Order, on_delete=models.CASCADE, related_name="trainer_earnings"
+    )
+    #: The line this share was computed from. Unique — see the class docstring.
+    order_item = models.OneToOneField(
+        OrderItem, on_delete=models.CASCADE, related_name="trainer_earning"
+    )
+    course = models.ForeignKey(
+        "courses.Course",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="trainer_earnings",
+    )
+
+    #: What the student actually paid for this line: **net of any coupon
+    #: discount and excluding GST.** Tax is the government's, not the
+    #: platform's to split, and a discount the platform chose to give is not
+    #: revenue anybody received.
+    gross = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    #: The trainer's percentage at the moment of sale, snapshotted.
+    share_pct = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    platform_fee = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    net = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    currency = models.CharField(max_length=8, default=CURRENCY_DEFAULT)
+
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.PENDING
+    )
+    #: Set when this line is swept into a payout. ``NULL`` means "still owed"
+    #: — whether it has actually been *paid* is then read from the payout's own
+    #: status, so there is one source of truth rather than two that can drift.
+    payout = models.ForeignKey(
+        "payments.TrainerPayout",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="earnings",
+    )
+    earned_at = models.DateTimeField()
+    reversed_at = models.DateTimeField(null=True, blank=True)
+    note = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["-earned_at", "-id"]
+        indexes = [
+            models.Index(fields=["trainer", "-earned_at"]),
+            models.Index(fields=["trainer", "status", "payout"]),
+        ]
+
+    def __str__(self):
+        return f"{self.trainer} earned {self.net} on order #{self.order_id}"
+
+    @property
+    def is_payable(self) -> bool:
+        """Still owed: not refunded, and not yet swept into a payout."""
+        return self.status == self.Status.PENDING and self.payout_id is None
