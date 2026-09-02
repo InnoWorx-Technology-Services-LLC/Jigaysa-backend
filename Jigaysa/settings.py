@@ -170,6 +170,12 @@ REST_FRAMEWORK = {
 # SimpleJWT — access lifetime covers §3.1 "session timeout";
 # rotation + blacklist covers multi-device logout.
 SIMPLE_JWT = {
+    # This platform authenticates only by JWT, so nothing else would ever write
+    # ``last_login`` — leaving it null on every account for ever and making any
+    # "active users" metric read zero regardless of real traffic. One
+    # single-row UPDATE per login, next to the LoginActivity INSERT we already
+    # do on the same path.
+    "UPDATE_LAST_LOGIN": True,
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=env("JWT_ACCESS_MINUTES")),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=env("JWT_REFRESH_DAYS")),
     "ROTATE_REFRESH_TOKENS": True,

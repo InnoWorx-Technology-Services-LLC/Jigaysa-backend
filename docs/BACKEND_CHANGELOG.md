@@ -7,6 +7,37 @@ Nothing here is committed yet — it is all in the working tree.
 
 ---
 
+## 🐛 "Active users" read zero on a live server with 22 users
+
+Found by calling the deployed `/api/v1/admin/reports/summary/` on
+`devapi.jigaysa.com`, logging in successfully first &mdash; and still getting
+`"active_users": 0`.
+
+**Cause:** `SIMPLE_JWT` had no `UPDATE_LAST_LOGIN` key, and it defaults to
+`False`. This platform authenticates *only* by JWT, so **nothing wrote
+`last_login` at all**. Every one of the 22 accounts on that server had it null,
+including the one that had just authenticated. The metric would have read zero
+for ever regardless of real traffic.
+
+**Fix:** `"UPDATE_LAST_LOGIN": True`, plus a composite index
+`(is_active, last_login)` on the user table &mdash; the report filters on both,
+so the count is served from the index without touching a row. Migration:
+`accounts/0010`.
+
+The alternative was counting distinct users out of `LoginActivity`, which is
+already populated and needs no write. Rejected on efficiency: `last_login`
+scales with **user count**, while the audit log scales with **login events**
+&mdash; including failed attempts, which an attacker controls, in an append-only
+table nobody prunes. It would also couple a dashboard read to a security log.
+The write objection was weak anyway: a `LoginActivity` INSERT already happens on
+that path, so a single-row UPDATE beside it is marginal.
+
+**Note for whoever deploys:** accounts that existed before this stay uncounted
+until their next sign-in, so the number climbs from zero over ninety days rather
+than jumping to its true value. That is honest, not a second bug.
+
+---
+
 ## Admin console — Institutions
 
 Organisations could only be created in Django admin, and the user&rarr;organisation

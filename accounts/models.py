@@ -49,6 +49,15 @@ class User(AbstractBaseUser, PermissionsMixin, TimeStampedModel):
 
     class Meta:
         ordering = ["-created_at"]
+        indexes = [
+            # Backs the "active users" report: active accounts seen since a
+            # cut-off. Composite rather than an index on ``last_login`` alone
+            # because the query always filters both, and this way the count is
+            # served from the index without touching a row.
+            models.Index(
+                fields=["is_active", "last_login"], name="user_active_seen_idx"
+            ),
+        ]
 
     def __str__(self):
         return self.email

@@ -241,3 +241,48 @@ def test_attendance_can_be_scoped_to_one_course(admin, course, trainer):
     resp = _api(admin).get(ATTENDANCE_URL, {"course": other.slug})
     assert resp.data["count"] == 1
     assert resp.data["results"][0]["course"] == "Data Science"
+
+
+# --------------------------------------------------------------------------- #
+# Active users — the metric that read zero on the live server
+# --------------------------------------------------------------------------- #
+
+
+def test_logging_in_makes_you_an_active_user(admin):
+    """The whole platform authenticates by JWT, so if the login endpoint does
+    not stamp ``last_login`` nothing does, and this tile reads zero for ever no
+    matter how much real traffic there is. It did, on the deployed server."""
+    assert _api(admin).get(SUMMARY_URL).data["active_users"] == 0
+
+    login = APIClient().post(
+        "/api/v1/auth/login/",
+        {"email": admin.email, "password": "StrongPass123!"},
+        format="json",
+    )
+    assert login.status_code == status.HTTP_200_OK
+
+    admin.refresh_from_db()
+    assert admin.last_login is not None
+    assert _api(admin).get(SUMMARY_URL).data["active_users"] == 1
+
+
+def test_a_failed_login_does_not_make_you_active(admin):
+    APIClient().post(
+        "/api/v1/auth/login/",
+        {"email": admin.email, "password": "wrong-password"},
+        format="json",
+    )
+    admin.refresh_from_db()
+    assert admin.last_login is None
+    assert _api(admin).get(SUMMARY_URL).data["active_users"] == 0
+
+
+def test_a_suspended_account_is_not_counted_active(admin):
+    other = User.objects.create_user(
+        email="lapsed@example.com", password="StrongPass123!"
+    )
+    other.last_login = timezone.now()
+    other.is_active = False
+    other.save(update_fields=["last_login", "is_active"])
+
+    assert _api(admin).get(SUMMARY_URL).data["active_users"] == 0

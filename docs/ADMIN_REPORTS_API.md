@@ -44,6 +44,14 @@ bound.
 definition, not a fact. Label the tile from it ("Active in 90 days") rather than
 hardcoding a window the backend might change.
 
+`active_users` is driven by `last_login`, which is stamped on every successful
+JWT login. **This was broken until recently** — SimpleJWT does not update
+`last_login` unless told to, and since the platform authenticates only by JWT,
+nothing wrote the field at all and this tile read `0` on a live server with 22
+users. Accounts that existed before the fix stay uncounted until their next
+sign-in, so expect the number to climb from zero over the first ninety days
+rather than jumping to its true value.
+
 > ### ⚠️ `payouts` is always `0`
 >
 > Nothing generates payout rows in this release (see
