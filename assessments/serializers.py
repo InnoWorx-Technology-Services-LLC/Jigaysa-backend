@@ -4,6 +4,7 @@ Choice correctness is hidden from students: ``ChoiceSerializer`` never exposes
 ``is_correct``, and question payloads for the attempt flow omit answer keys.
 """
 
+from django.utils import timezone
 from rest_framework import serializers
 
 from assessments.models import (
@@ -279,3 +280,57 @@ class GradeSerializer(serializers.Serializer):
     percent = serializers.IntegerField(min_value=0, max_value=100)
     feedback = serializers.CharField(required=False, allow_blank=True)
     passed = serializers.BooleanField(required=False)
+
+
+# --------------------------------------------------------------------------- #
+# The trainer's Assignments page
+# --------------------------------------------------------------------------- #
+
+
+class AssessmentBoardSerializer(AssessmentSerializer):
+    """An assessment as the trainer's Assignments list draws it.
+
+    The three counts are **annotated by the view in one query**, not computed
+    per row — a serializer that reaches back into the ORM turns a 20-row page
+    into 60 queries, and this page exists to be scanned quickly.
+    """
+
+    course_title = serializers.CharField(source="course.title", read_only=True)
+    submitted_count = serializers.IntegerField(read_only=True)
+    pending_review_count = serializers.IntegerField(read_only=True)
+    enrolled_count = serializers.IntegerField(read_only=True)
+    state = serializers.SerializerMethodField()
+
+    class Meta(AssessmentSerializer.Meta):
+        fields = AssessmentSerializer.Meta.fields + (
+            "course_title", "submitted_count", "pending_review_count",
+            "enrolled_count", "state",
+        )
+
+    def get_state(self, obj) -> str:
+        """The `open` / `closed` badge, as one word the table prints.
+
+        Three things decide it and the client should not have to reassemble
+        them: an unpublished assessment is a `draft`, one past its
+        ``available_to`` is `closed`, anything else is `open`. A row with no
+        deadline never closes on its own.
+        """
+        if not obj.is_published:
+            return "draft"
+        if obj.available_to and obj.available_to < timezone.now():
+            return "closed"
+        return "open"
+
+
+class AssignmentStatsSerializer(serializers.Serializer):
+    """The three tiles above the list.
+
+    ``pending_reviews`` is the only actionable number on the page — it is work
+    queued for this trainer specifically — so it is counted across all their
+    assessments, not just the open ones. Closing an assignment does not grade
+    what students already handed in.
+    """
+
+    open_assignments = serializers.IntegerField()
+    pending_reviews = serializers.IntegerField()
+    average_score = serializers.FloatField(allow_null=True)

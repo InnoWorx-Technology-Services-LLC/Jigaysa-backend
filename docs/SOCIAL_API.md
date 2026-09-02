@@ -443,8 +443,12 @@ post that published is not failed over a missing link.
 
 ## 10. `GET /social/campaigns/` — the Promotions tab
 
-Optional `?course=<slug>` and `?status=<status>`. Newest first, capped at 100.
-Scoped to your own campaigns; admins see all.
+**Paginated** — `?page`, `?page_size` (default 20, max 100), with a
+`{count, next, previous, results}` envelope. A trainer accumulates a campaign
+per promotion for the life of their account, so this list only grows.
+
+Optional `?course=<slug>` and `?status=<status>`. Newest first. Scoped to your
+own campaigns; admins see all.
 
 ## 11. `PATCH /social/campaigns/{id}/` — edit or move
 

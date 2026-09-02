@@ -7,6 +7,80 @@ Nothing here is committed yet — it is all in the working tree.
 
 ---
 
+## Trainer console — Assignments and Analytics
+
+The two trainer pages that had nothing behind their dashboard layer. References:
+`docs/TRAINER_ASSIGNMENTS_API.md`, `docs/TRAINER_ANALYTICS_API.md`.
+
+### Assignments — the numbers that make it a dashboard
+
+CRUD and grading already existed; the tiles and per-row counts did not.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/assessments/board/` | your assignments, **paginated**, with counts |
+| `GET /api/v1/assessments/stats/` | open assignments · pending reviews · avg score |
+| `GET /api/v1/assessments/?mine=true` | the plain list, narrowed to your own |
+
+Each row carries `submitted_count`, `pending_review_count` (**the number on the
+Review button**), `enrolled_count`, and a one-word `state` — `draft`, `open` or
+`closed` — so the client doesn't reassemble it from `is_published` plus
+`available_to`.
+
+> **The plain `/assessments/` list is not trainer-scoped, deliberately** — it
+> shows every *published* assessment, which is right for browsing and wrong for
+> a page with an Edit button on every row. `board/` is always scoped; `?mine=true`
+> narrows the plain list.
+
+### 🔒 Fixed while building: an access-control gap
+
+`api_roles_by_action` is **schema metadata only** in this project — `core.schema`
+reads it for the docs and nothing enforces it. `AssessmentViewSet` carries
+`permission_classes = [IsAuthenticated]` and does its role checks by hand in
+`perform_create`. New actions inheriting that attribute looked protected and were
+not; `board/` and `stats/` now check explicitly, like the rest of the module.
+Worth remembering when adding any future action to a viewset in this codebase.
+
+### Analytics — new, and scoped to your own courses
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/trainer/analytics/summary/` | completion · quiz average · submission rate · active learners |
+| `GET /api/v1/trainer/analytics/engagement/` | lessons completed and submissions, by month |
+| `GET /api/v1/trainer/analytics/courses/` | per-course insights, **paginated** |
+| `GET /api/v1/trainer/analytics/doubts/` | the doubt queue, **paginated** |
+
+Every number comes from courses where `course.trainer == you`. There is no
+parameter to widen it — the platform-wide view is the admin-only
+`/admin/reports/`, and one view with an `if admin` branch is how the wrong
+number reaches the wrong person.
+
+**The rates are `null`, never `0`, when there is nothing to average.** A trainer
+with no submissions has no quiz average; 0% says "everyone failed".
+
+### 🙈 "AI-detected doubt frequency" cannot be built as designed
+
+The mock ranks clustered topics — "useEffect cleanup · 47" with a trend arrow.
+Clustering free text into topics needs a language model and **there is no LLM
+anywhere in this backend**. Rather than fabricate the ranking, the endpoint
+returns the doubts themselves, which a trainer can actually answer. Build that
+panel as a queue, not a bar chart.
+
+Same issue as the Promotions blurb's "let AI tailor the copy per network" — that
+rewrite is rule-based too. Both strings are worth changing.
+
+### 🐛 Two bugs the tests caught
+
+- **The doubt queue was sorted backwards.** Ordering by `status` sorts
+  alphabetically, and `"answered"` precedes `"open"` — the exact inverse of a
+  queue, silently. Now ordered explicitly, open first.
+- **Campaign history was not paginated** (from the earlier promotions work) — a
+  bare array capped at 100. That is the failure mode that hides rather than
+  breaks: correct until the 101st campaign quietly stops appearing. Now uses the
+  standard envelope, and `docs/SOCIAL_API.md` §10 is updated.
+
+---
+
 ## Admin console — Users, Payments and Reports
 
 Three admin pages that had **no backend at all**. Each has its own reference:

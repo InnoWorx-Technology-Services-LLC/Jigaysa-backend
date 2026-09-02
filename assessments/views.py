@@ -8,8 +8,9 @@ exposed to students (see ``ChoiceSerializer``).
 """
 
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Avg, Count, Q
 from django.utils import timezone
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -23,8 +24,10 @@ from assessments.models import (
     Submission,
 )
 from assessments.serializers import (
+    AssessmentBoardSerializer,
     AssessmentDetailSerializer,
     AssessmentSerializer,
+    AssignmentStatsSerializer,
     GradeSerializer,
     QuestionAuthorSerializer,
     QuestionBulkSerializer,
@@ -67,12 +70,16 @@ class AssessmentViewSet(viewsets.ModelViewSet):
         "partial_update": TRAINER_WRITE,
         "destroy": TRAINER_WRITE,
         "questions": TRAINER_WRITE,
+        "board": TRAINER_WRITE,
+        "stats": TRAINER_WRITE,
         "submit": ("student",),
     }
 
     def get_serializer_class(self):
         if self.action == "retrieve":
             return AssessmentDetailSerializer
+        if self.action == "board":
+            return AssessmentBoardSerializer
         return AssessmentSerializer
 
     def get_queryset(self):
@@ -83,10 +90,50 @@ class AssessmentViewSet(viewsets.ModelViewSet):
                 qs = qs.filter(Q(is_published=True) | Q(trainer=user))
             else:
                 qs = qs.filter(is_published=True)
+
+        # ``?mine=true`` narrows to what this trainer authored. Needed because
+        # the default deliberately includes every *published* assessment — good
+        # for browsing, wrong for a page called "your assignments", which would
+        # otherwise list colleagues' work with an Edit button beside it.
+        if self.request.query_params.get("mine", "").lower() in ("1", "true", "yes"):
+            qs = qs.filter(trainer=user)
+
         qs = _filter_by(qs, self.request, "course", "course_id")
         qs = _filter_by(qs, self.request, "lesson", "lesson_id")
         qs = _filter_by(qs, self.request, "assessment_type")
         return qs
+
+    def _with_counts(self, queryset):
+        """Annotate the three per-row numbers the Assignments table shows.
+
+        One query for all of them. ``distinct=True`` on each because joining
+        submissions and enrollments in the same statement multiplies the rows —
+        without it a course with 30 students reports 30× the submissions.
+        """
+        return queryset.annotate(
+            submitted_count=Count(
+                "submissions",
+                filter=Q(
+                    submissions__status__in=(
+                        Submission.Status.SUBMITTED,
+                        Submission.Status.GRADED,
+                        Submission.Status.PASSED,
+                        Submission.Status.FAILED,
+                    )
+                ),
+                distinct=True,
+            ),
+            pending_review_count=Count(
+                "submissions",
+                filter=Q(submissions__status=Submission.Status.SUBMITTED),
+                distinct=True,
+            ),
+            enrolled_count=Count(
+                "course__enrollments",
+                filter=Q(course__enrollments__status=Enrollment.Status.ACTIVE),
+                distinct=True,
+            ),
+        )
 
     def get_serializer_context(self):
         return {**super().get_serializer_context(), "request": self.request}
@@ -108,6 +155,83 @@ class AssessmentViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         self._assert_owner(instance)
         instance.delete()
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                "assessment_type", str, OpenApiParameter.QUERY,
+                description="quiz | assignment | coding | descriptive",
+            ),
+            OpenApiParameter("course", int, OpenApiParameter.QUERY),
+        ],
+        responses=AssessmentBoardSerializer(many=True),
+    )
+    @action(detail=False, methods=["get"])
+    def board(self, request):
+        """GET ``/assessments/board/`` — the trainer's Assignments list.
+
+        The plain list with three counts annotated on: how many students have
+        handed in, how many of those are waiting on this trainer, and how many
+        are enrolled. Paginated, and always scoped to the caller's own work —
+        a page with an Edit button beside every row has no business showing a
+        colleague's assignment.
+        """
+        # ``api_roles_by_action`` is schema metadata in this project, not an
+        # enforcement point (see core.schema) — the role check has to be here,
+        # the same way ``perform_create`` does it.
+        if not _is_trainer_role(request.user):
+            raise PermissionDenied("Only trainers have an assignments board.")
+
+        queryset = self._with_counts(
+            self.get_queryset().filter(trainer=request.user)
+        ).order_by("-created_at")
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            return self.get_paginated_response(
+                self.get_serializer(page, many=True).data
+            )
+        return Response(self.get_serializer(queryset, many=True).data)
+
+    @extend_schema(responses=AssignmentStatsSerializer)
+    @action(detail=False, methods=["get"])
+    def stats(self, request):
+        """GET ``/assessments/stats/`` — the three tiles.
+
+        Scoped to the caller's own assessments. ``average_score`` is ``null``,
+        never ``0``, when nothing has been graded yet — a brand-new trainer has
+        no average, which is not the same as an average of zero.
+        """
+        if not _is_trainer_role(request.user):
+            raise PermissionDenied("Only trainers have assignment statistics.")
+
+        mine = Assessment.objects.filter(trainer=request.user)
+        now = timezone.now()
+
+        open_count = mine.filter(is_published=True).filter(
+            Q(available_to__isnull=True) | Q(available_to__gte=now)
+        ).count()
+        pending = Submission.objects.filter(
+            assessment__trainer=request.user,
+            status=Submission.Status.SUBMITTED,
+        ).count()
+        average = Submission.objects.filter(
+            assessment__trainer=request.user,
+            status__in=(
+                Submission.Status.GRADED,
+                Submission.Status.PASSED,
+                Submission.Status.FAILED,
+            ),
+        ).aggregate(avg=Avg("percent"))["avg"]
+
+        return Response(
+            AssignmentStatsSerializer(
+                {
+                    "open_assignments": open_count,
+                    "pending_reviews": pending,
+                    "average_score": round(average, 1) if average is not None else None,
+                }
+            ).data
+        )
 
     @action(detail=True, methods=["get", "post"], url_path="questions")
     def questions(self, request, pk=None):

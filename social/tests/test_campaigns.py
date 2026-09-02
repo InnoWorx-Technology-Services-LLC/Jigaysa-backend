@@ -486,6 +486,19 @@ def test_a_campaign_that_is_already_public_is_not_deleted(
     assert Campaign.objects.filter(pk=created.data["id"]).exists()
 
 
+def test_campaign_history_is_paginated(api, trainer, course, linkedin, stub_publish):
+    """It grows for the life of the account, so it is never returned whole."""
+    stub_publish()
+    for _ in range(25):
+        _create(api, trainer, course, [linkedin])
+
+    resp = auth(api, trainer).get(reverse("social:campaign-list"))
+    assert set(resp.data) >= {"count", "next", "previous", "results"}
+    assert resp.data["count"] == 25
+    assert len(resp.data["results"]) == 20
+    assert resp.data["next"]
+
+
 def test_campaigns_are_scoped_to_their_trainer(
     api, trainer, other_trainer, course, linkedin, stub_publish
 ):
@@ -498,7 +511,8 @@ def test_campaigns_are_scoped_to_their_trainer(
     assert resp.status_code == status.HTTP_404_NOT_FOUND
 
     listed = auth(api, other_trainer).get(reverse("social:campaign-list"))
-    assert listed.data == []
+    assert listed.data["count"] == 0
+    assert listed.data["results"] == []
 
 
 # --------------------------------------------------------------------------- #

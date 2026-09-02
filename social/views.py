@@ -29,6 +29,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.pagination import DefaultPagination
 from core.permissions import HasRole
 from courses.models import Course
 from social import oauth, promotions, providers, publishing
@@ -433,6 +434,14 @@ class CampaignListCreateView(APIView):
         responses=CampaignSerializer(many=True),
     )
     def get(self, request):
+        """Campaign history, **paginated** like every other list on the platform.
+
+        A trainer accumulates a campaign per promotion for the life of their
+        account, so this is a list that only grows. It used to return a bare
+        array capped at 100, which is the failure that hides rather than
+        breaks — the page looks right until the hundred-and-first campaign
+        quietly stops appearing.
+        """
         queryset = self._queryset(request)
         course = request.query_params.get("course")
         if course:
@@ -440,7 +449,12 @@ class CampaignListCreateView(APIView):
         state = request.query_params.get("status")
         if state:
             queryset = queryset.filter(status=state)
-        return Response(CampaignSerializer(queryset[:100], many=True).data)
+
+        paginator = DefaultPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        return paginator.get_paginated_response(
+            CampaignSerializer(page, many=True).data
+        )
 
     @extend_schema(request=CampaignCreateSerializer, responses=CampaignSerializer)
     def post(self, request):

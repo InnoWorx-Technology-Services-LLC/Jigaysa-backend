@@ -73,3 +73,68 @@ class AttendanceRowSerializer(serializers.Serializer):
     enrolled = serializers.IntegerField()
     capacity = serializers.IntegerField()
     attendance_rate = serializers.FloatField(allow_null=True)
+
+
+# --------------------------------------------------------------------------- #
+# The trainer's Analytics page
+# --------------------------------------------------------------------------- #
+
+
+class TrainerSummarySerializer(serializers.Serializer):
+    """The four tiles, all scoped to the caller's own courses.
+
+    The three rates are **null when there is nothing to average**, never zero.
+    A trainer with no submissions has no quiz average; printing 0% would read
+    as "everyone failed", which is a different and much worse message.
+    """
+
+    completion = serializers.FloatField(allow_null=True)
+    quiz_average = serializers.FloatField(allow_null=True)
+    submission_rate = serializers.FloatField(allow_null=True)
+    active_learners = serializers.IntegerField()
+    courses = serializers.IntegerField()
+
+
+class TrainerTrendSerializer(serializers.Serializer):
+    """The engagement chart.
+
+    Two series over one dense, shared month range — index *n* is the same month
+    in both. Named for what they actually count rather than reusing the admin
+    trend shape, which would have handed this page a field called ``revenue``.
+    """
+
+    months = serializers.IntegerField()
+    lessons_completed = TrendPointSerializer(many=True)
+    submissions = TrendPointSerializer(many=True)
+
+
+class CourseInsightSerializer(serializers.Serializer):
+    """One row of the per-course table.
+
+    ``completion`` and ``quiz_average`` are percentages 0–100, or ``null`` when
+    the course has no enrolments / nothing graded — the same null-not-zero rule
+    the tiles follow.
+    """
+
+    course_id = serializers.IntegerField()
+    course = serializers.CharField()
+    course_slug = serializers.CharField()
+    learners = serializers.IntegerField()
+    completion = serializers.FloatField(allow_null=True)
+    quiz_average = serializers.FloatField(allow_null=True)
+
+
+class DoubtSerializer(serializers.Serializer):
+    """A question a student raised in one of this trainer's sessions.
+
+    The raw doubt, not a clustered topic — see ``TrainerDoubtsView`` for why the
+    mock's "AI-detected" ranking is not what this returns.
+    """
+
+    id = serializers.IntegerField()
+    text = serializers.CharField()
+    status = serializers.CharField()
+    asked_at = serializers.DateTimeField()
+    student_name = serializers.CharField(allow_blank=True)
+    session_title = serializers.CharField(allow_blank=True)
+    course = serializers.CharField(allow_blank=True)
