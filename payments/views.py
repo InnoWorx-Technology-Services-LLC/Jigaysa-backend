@@ -12,6 +12,8 @@ from django.conf import settings
 from django.db.models import Sum
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema
+from django.db import transaction
+from django.db.models import ProtectedError
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -98,6 +100,42 @@ class PricingPlanViewSet(viewsets.ModelViewSet):
         if self.action in ("list", "retrieve"):
             return [AllowAny()]
         return [IsAdmin()]
+
+
+    def destroy(self, request, *args, **kwargs):
+        """Refuse with a 409 when subscribers still hold this plan.
+
+        ``Subscription.plan`` is ``on_delete=PROTECT`` — the only protecting
+        reference to a plan in the codebase. Without this the ``ProtectedError``
+        escapes as a Django 500 page, which tells an admin nothing and hands the
+        frontend HTML where it expected JSON.
+
+        Orders do **not** protect a plan: they reference one through
+        ``OrderItem.object_id``, a plain integer, so they can never be the
+        reason. The message names subscriptions specifically, and counts them,
+        because "something is using this" is not actionable.
+        """
+        plan = self.get_object()
+        try:
+            with transaction.atomic():
+                return super().destroy(request, *args, **kwargs)
+        except ProtectedError:
+            subscribers = plan.subscriptions.count()
+            active = plan.subscriptions.filter(
+                status=Subscription.Status.ACTIVE
+            ).count()
+            return Response(
+                {
+                    "detail": (
+                        f"{subscribers} subscription(s) still reference this "
+                        f"plan ({active} active). Cancel or move them first, or "
+                        f"deactivate the plan instead of deleting it."
+                    ),
+                    "subscriptions": subscribers,
+                    "active_subscriptions": active,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
 
 
 class CoursePriceViewSet(viewsets.ModelViewSet):

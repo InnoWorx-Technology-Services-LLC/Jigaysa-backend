@@ -182,6 +182,23 @@ Paginated, read-only. Filters: `status` (`pending` · `paid`), `from`, `to`.
 > Payouts tile on Reports will read ₹0. Don't present either as a live figure
 > until payout generation exists.
 
+### Settling one
+
+```
+POST   /admin/payouts/{id}/mark-paid/      → status: "paid"
+POST   /admin/payouts/{id}/mark-unpaid/    → undo a mistake
+DELETE /admin/payouts/{id}/                → only if no earnings back it
+```
+
+`mark-paid` **does not send money** — it records that a human paid it by other
+means, which is the only thing the platform can honestly claim. Idempotent, so a
+double-click cannot rewrite when someone was paid.
+
+`DELETE` exists for orphans: rows written before the earnings ledger existed,
+which reconcile against nothing and still inflate the Reports payout tile. A
+payout **with** earning lines is refused with `409` — deleting it would push
+already-paid money back into that trainer's pending balance.
+
 **"Configure gateway"** is not here — gateway credentials live in platform
 settings (`docs/PLATFORM_SETTINGS_API.md`).
 
@@ -190,8 +207,6 @@ settings (`docs/PLATFORM_SETTINGS_API.md`).
 ## 6. Not in this release
 
 - **Payout generation.** See above.
-- **Payout marking.** No endpoint moves a payout to `paid`; the queue is
-  read-only.
 - **Reconciliation reports.** The page blurb mentions them; nothing computes a
   gateway-versus-ledger comparison.
 - **Export.** No CSV endpoint. The paginated JSON is the whole story.

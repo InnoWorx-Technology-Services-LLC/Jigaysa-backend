@@ -226,7 +226,10 @@ class AdminRefundViewSet(
 
 
 class AdminPayoutViewSet(
-    mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.DestroyModelMixin,
+    viewsets.GenericViewSet,
 ):
     """The trainer payout queue.
 
@@ -249,3 +252,62 @@ class AdminPayoutViewSet(
         if state in dict(TrainerPayout.Status.choices):
             queryset = queryset.filter(status=state)
         return _date_window(self.request, queryset)
+
+    @extend_schema(request=None, responses=AdminPayoutSerializer)
+    @action(detail=True, methods=["post"], url_path="mark-paid")
+    def mark_paid(self, request, pk=None):
+        """Record that this payout has been settled.
+
+        **This does not send money** — there is no payout processor. It records
+        that a human paid it by other means, which is the only thing the
+        platform can honestly claim. Idempotent: marking an already-paid payout
+        returns it unchanged rather than moving ``paid_at``, so a double-click
+        cannot rewrite when someone was paid.
+        """
+        payout = self.get_object()
+        if payout.status != TrainerPayout.Status.PAID:
+            payout.status = TrainerPayout.Status.PAID
+            payout.paid_at = timezone.now()
+            payout.save(update_fields=["status", "paid_at", "updated_at"])
+        return Response(AdminPayoutSerializer(payout).data)
+
+    @extend_schema(request=None, responses=AdminPayoutSerializer)
+    @action(detail=True, methods=["post"], url_path="mark-unpaid")
+    def mark_unpaid(self, request, pk=None):
+        """Undo a mark-paid that was made in error."""
+        payout = self.get_object()
+        if payout.status != TrainerPayout.Status.PENDING:
+            payout.status = TrainerPayout.Status.PENDING
+            payout.paid_at = None
+            payout.save(update_fields=["status", "paid_at", "updated_at"])
+        return Response(AdminPayoutSerializer(payout).data)
+
+    @extend_schema(responses={204: None})
+    def destroy(self, request, *args, **kwargs):
+        """Delete a payout that no earnings back — and only that.
+
+        Exists for orphans: rows written by the seed script before the earnings
+        ledger existed, which reference nothing, reconcile against nothing, and
+        still inflate the Reports payout tile.
+
+        A payout **with** earning lines is refused with a `409`. Deleting one
+        would orphan those lines in turn (their ``payout`` FK is ``SET_NULL``),
+        silently returning already-paid money to the "pending payout" total —
+        turning one bad row into a wrong number on a trainer's earnings page.
+        """
+        payout = self.get_object()
+        lines = payout.earnings.count()
+        if lines:
+            return Response(
+                {
+                    "detail": (
+                        f"This payout has {lines} earning line(s) behind it. "
+                        "Deleting it would put that money back into the "
+                        "trainer's pending balance. Mark it unpaid instead."
+                    ),
+                    "earning_lines": lines,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        payout.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)

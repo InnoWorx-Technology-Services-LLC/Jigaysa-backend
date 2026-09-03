@@ -7,6 +7,78 @@ Nothing here is committed yet — it is all in the working tree.
 
 ---
 
+## Frontend request batch — 9 of 11 shipped
+
+Everything the frontend team raised on 2 Sep. Nine are done; two are actions on
+the server rather than code. Verification of the original list is in the triage
+report; this is what changed.
+
+### ✅ Shipped
+
+| # | Ask | Done |
+|---|---|---|
+| 1 | Student name on submissions | `student_name`, `student_email` **and** `assessment_title` inlined on `SubmissionSerializer` |
+| 3 | 500 on plan delete | now `409` with JSON, naming subscriptions and counting them |
+| 4 | Grade endpoint docs | `@extend_schema(request=GradeSerializer)` — Swagger and OPTIONS now show the real body |
+| 5 | Bad payout row | `DELETE /admin/payouts/{id}/` added — it removes exactly this kind of orphan |
+| 6 | `average_per_course` | returns `null` when `earning_courses` is 0, matching `average_score` |
+| 7 | `open_assignments` scope | `/assessments/stats/` now takes `?assessment_type=`, narrowing all three tiles together |
+| 8 | Clearing bank details | `DELETE /trainer/earnings/bank-account/` |
+| 9 | Change password | `POST /auth/change-password/` |
+| 9 | Active sessions | `GET /auth/sessions/`, `DELETE /auth/sessions/{id}/`, `DELETE /auth/sessions/` |
+| 9 | Mark a payout paid | `POST /admin/payouts/{id}/mark-paid/` and `/mark-unpaid/` |
+| 9 | 2FA | opt-in SMS second factor — `GET`/`POST`/`DELETE /auth/2fa/` + `/2fa/confirm/` |
+| 11 | `grading_type: "rubric"` | `GET`/`PUT /assessments/{id}/rubric/`, and grading validates against the criteria |
+
+### ⚠️ Three corrections to the original list
+
+1. **#2 — payments were never blocked.** `/orders/{id}/pay/` returns `409` only
+   because a real gateway *is* configured on dev (`razorpay_key_source:
+   "environment"`). The checkout &rarr; verify path works today. Re-enabling
+   `/pay/` would mean unsetting the keys, which also disables the path production
+   uses. **Left alone deliberately** — run one test card instead.
+2. **#3 — orders were not the cause.** The only protecting FK to `PricingPlan` is
+   `Subscription.plan`. Orders reference a plan through `OrderItem.object_id`, a
+   plain integer, so they cannot raise `ProtectedError` at all. The new 409
+   message names subscriptions, because a message blaming orders would have been
+   wrong every time.
+3. **#11 — the rubric already existed.** `Rubric` and `RubricSerializer` have
+   been there since the initial migration. What was missing was an endpoint and
+   any use in `grade`. This was wiring, not a new feature, and "remove the
+   option" would have discarded working code.
+
+### 2FA changes the login response — for opted-in accounts only
+
+An account with two-factor on gets `200` with `{"otp_required": true,
+"phone_hint": "•••••••3210"}` **and no tokens**; the existing
+`/auth/otp/verify/` completes the sign-in. Everyone else sees no change at all,
+which is why this is a branch on the existing endpoint rather than a new one.
+
+Built on the OTP plumbing that already existed — no new dependency. Enabling is
+two steps (send, then confirm the code) so a wrong number cannot lock someone
+out; disabling asks for the **password, not a code**, because a lost phone is
+exactly when it needs turning off.
+
+### 🔒 Changing a password ends every other session
+
+Someone changing a password usually suspects a device they no longer hold. All
+outstanding refresh tokens are blacklisted, and the response reports how many.
+
+### 🚧 Two items are server actions, not code
+
+- **#2 &mdash; run one test payment.** Nothing downstream can be verified until an
+  order settles: it writes the first earning lines, which is also what makes #10
+  do anything.
+- **#10 &mdash; the payouts cron.** `generate_trainer_payouts` would create nothing
+  today regardless, because there are no earnings to sweep. Blocked by #2, not by
+  scheduling.
+
+### Config
+
+Migrations: `accounts/0011` (`two_factor_enabled`). No new packages.
+
+---
+
 ## 🐛 "Active users" read zero on a live server with 22 users
 
 Found by calling the deployed `/api/v1/admin/reports/summary/` on

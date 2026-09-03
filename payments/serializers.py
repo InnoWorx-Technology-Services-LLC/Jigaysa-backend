@@ -312,7 +312,10 @@ class EarningsSummarySerializer(serializers.Serializer):
     this_month = serializers.DecimalField(max_digits=14, decimal_places=2)
     lifetime = serializers.DecimalField(max_digits=14, decimal_places=2)
     pending_payout = serializers.DecimalField(max_digits=14, decimal_places=2)
-    average_per_course = serializers.DecimalField(max_digits=14, decimal_places=2)
+    #: ``null`` until at least one course has earned — never ``"0.00"``.
+    average_per_course = serializers.DecimalField(
+        max_digits=14, decimal_places=2, allow_null=True
+    )
     earning_courses = serializers.IntegerField()
     share_pct = serializers.DecimalField(max_digits=5, decimal_places=2)
     platform_fee_pct = serializers.DecimalField(max_digits=5, decimal_places=2)

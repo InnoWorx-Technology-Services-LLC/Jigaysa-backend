@@ -21,6 +21,7 @@ from assessments.models import (
     Answer,
     Assessment,
     Question,
+    Rubric,
     Submission,
 )
 from assessments.serializers import (
@@ -31,6 +32,7 @@ from assessments.serializers import (
     GradeSerializer,
     QuestionAuthorSerializer,
     QuestionBulkSerializer,
+    RubricSerializer,
     SubmissionSerializer,
     SubmitSerializer,
 )
@@ -56,6 +58,44 @@ def _filter_by(qs, request, param, field=None):
     return qs
 
 
+def _clean_criteria(criteria):
+    """Validate the rubric's shape before it is stored.
+
+    ``criteria`` is a JSONField, so nothing at the database layer stops a
+    malformed list — and a rubric that grades against ``{"nmae": ...}`` fails
+    silently at marking time, which is the worst moment to find out.
+    """
+    if not isinstance(criteria, list):
+        raise ValidationError("criteria must be a list.")
+    cleaned = []
+    for i, row in enumerate(criteria, start=1):
+        if not isinstance(row, dict):
+            raise ValidationError(f"Criterion {i} must be an object.")
+        name = str(row.get("name", "")).strip()
+        if not name:
+            raise ValidationError(f"Criterion {i} needs a name.")
+        try:
+            points = float(row.get("max_points", 0))
+        except (TypeError, ValueError):
+            raise ValidationError(f"Criterion {i}: max_points must be a number.")
+        if points <= 0:
+            raise ValidationError(
+                f"Criterion {i}: max_points must be greater than zero."
+            )
+        cleaned.append({"name": name[:255], "max_points": points})
+    return cleaned
+
+
+def _rubric_total(assessment):
+    """Total points a rubric allows, or ``None`` when it does not apply."""
+    if assessment.grading_type != Assessment.GradingType.RUBRIC:
+        return None
+    rubric = getattr(assessment, "rubric", None)
+    if rubric is None:
+        return 0
+    return sum(float(c.get("max_points", 0)) for c in (rubric.criteria or []))
+
+
 class AssessmentViewSet(viewsets.ModelViewSet):
     """Quizzes/assignments. Filters: ``?course=<id>``, ``?lesson=<id>``,
     ``?assessment_type=quiz|assignment|coding|descriptive``. Students only see
@@ -70,6 +110,7 @@ class AssessmentViewSet(viewsets.ModelViewSet):
         "partial_update": TRAINER_WRITE,
         "destroy": TRAINER_WRITE,
         "questions": TRAINER_WRITE,
+        "rubric": TRAINER_WRITE,
         "board": TRAINER_WRITE,
         "stats": TRAINER_WRITE,
         "submit": ("student",),
@@ -156,6 +197,33 @@ class AssessmentViewSet(viewsets.ModelViewSet):
         self._assert_owner(instance)
         instance.delete()
 
+    @extend_schema(request=RubricSerializer, responses=RubricSerializer)
+    @action(detail=True, methods=["get", "put"], url_path="rubric")
+    def rubric(self, request, pk=None):
+        """The grading rubric for an assessment.
+
+        ``grading_type: "rubric"`` has been a selectable value since the first
+        migration with no way to reach the ``Rubric`` model behind it, so it
+        graded exactly like ``manual``. This is the missing half.
+
+        ``criteria`` is a list of ``{"name": str, "max_points": number}``.
+        ``PUT`` replaces the whole list — a rubric is edited as one thing, and
+        per-criterion patching would leave the editor reconciling deletes.
+        """
+        assessment = self.get_object()
+        rubric, _ = Rubric.objects.get_or_create(assessment=assessment)
+
+        if request.method == "GET":
+            return Response(RubricSerializer(rubric).data)
+
+        self._assert_owner(assessment)
+        body = RubricSerializer(rubric, data=request.data, partial=True)
+        body.is_valid(raise_exception=True)
+        criteria = _clean_criteria(body.validated_data.get("criteria", []))
+        rubric.criteria = criteria
+        rubric.save(update_fields=["criteria", "updated_at"])
+        return Response(RubricSerializer(rubric).data)
+
     @extend_schema(
         parameters=[
             OpenApiParameter(
@@ -192,7 +260,18 @@ class AssessmentViewSet(viewsets.ModelViewSet):
             )
         return Response(self.get_serializer(queryset, many=True).data)
 
-    @extend_schema(responses=AssignmentStatsSerializer)
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                "assessment_type", str, OpenApiParameter.QUERY,
+                description=(
+                    "Narrow the tiles to one type, e.g. `assignment`. Pass the "
+                    "same value the board is showing or the two will disagree."
+                ),
+            )
+        ],
+        responses=AssignmentStatsSerializer,
+    )
     @action(detail=False, methods=["get"])
     def stats(self, request):
         """GET ``/assessments/stats/`` — the three tiles.
@@ -205,17 +284,21 @@ class AssessmentViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Only trainers have assignment statistics.")
 
         mine = Assessment.objects.filter(trainer=request.user)
+        # Honour the same ``?assessment_type=`` the board is called with, so the
+        # tile and the list beneath it count the same things. Without it the
+        # tile silently included quizzes and coding tests while the list showed
+        # assignments only, and the two disagreed for no visible reason.
+        mine = _filter_by(mine, request, "assessment_type")
         now = timezone.now()
 
         open_count = mine.filter(is_published=True).filter(
             Q(available_to__isnull=True) | Q(available_to__gte=now)
         ).count()
         pending = Submission.objects.filter(
-            assessment__trainer=request.user,
-            status=Submission.Status.SUBMITTED,
+            assessment__in=mine, status=Submission.Status.SUBMITTED
         ).count()
         average = Submission.objects.filter(
-            assessment__trainer=request.user,
+            assessment__in=mine,
             status__in=(
                 Submission.Status.GRADED,
                 Submission.Status.PASSED,
@@ -411,9 +494,16 @@ class SubmissionViewSet(
         qs = _filter_by(qs, self.request, "status")
         return qs
 
+    @extend_schema(request=GradeSerializer, responses=SubmissionSerializer)
     @action(detail=True, methods=["post"])
     def grade(self, request, pk=None):
-        """Trainer manual grade for subjective submissions (PRD §3.12 rubric)."""
+        """Trainer manual grade for subjective submissions (PRD §3.12 rubric).
+
+        The body is ``GradeSerializer`` — ``score``, ``percent``, and optional
+        ``feedback`` and ``passed``. Annotated explicitly because the viewset's
+        ``serializer_class`` is ``SubmissionSerializer``, which is what the
+        schema would otherwise advertise as the request body.
+        """
         submission = self.get_object()
         user = request.user
         if submission.assessment.trainer_id != user.id and not _is_admin(user):
@@ -421,6 +511,22 @@ class SubmissionViewSet(
         payload = GradeSerializer(data=request.data)
         payload.is_valid(raise_exception=True)
         data = payload.validated_data
+
+        # When the assessment is graded by rubric, the score has to fit it —
+        # otherwise "rubric" is a label on the same free-text grading as
+        # "manual", which is exactly what it was before.
+        rubric_total = _rubric_total(submission.assessment)
+        if rubric_total is not None:
+            if rubric_total <= 0:
+                raise ValidationError(
+                    "This assessment is graded by rubric but its rubric has no "
+                    "criteria yet. Add them before grading."
+                )
+            if data["score"] > rubric_total:
+                raise ValidationError(
+                    f"Score {data['score']} is above the rubric total of "
+                    f"{rubric_total}."
+                )
 
         submission.score = data["score"]
         submission.percent = data["percent"]

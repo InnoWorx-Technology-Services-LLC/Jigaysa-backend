@@ -31,6 +31,11 @@ numbers that make the page a dashboard instead of a list.
 
 Scoped to **your own** assessments. Not paginated — it's one object.
 
+**Pass the same `?assessment_type=` your board is showing.** Without it the tiles
+count every type — quizzes and coding tests included — while the list below shows
+one, and the two disagree for no visible reason. The filter narrows
+`open_assignments`, `pending_reviews` and `average_score` together.
+
 | Field | Means |
 |---|---|
 | `open_assignments` | published, and either no deadline or a deadline still ahead |
@@ -126,9 +131,13 @@ narrow view without the counts.
 The **Review (N pending)** button opens the grading queue for one assignment:
 
 ```
-GET /submissions/?assessment=12&status=submitted
-POST /submissions/{id}/grade/
+GET  /submissions/?assessment=12&status=submitted
+POST /submissions/{id}/grade/     { "score", "percent", "feedback?", "passed?" }
 ```
+
+Each submission carries **`student_name`, `student_email` and
+`assessment_title`** inline — a grading queue that says "student: 12" cannot be
+worked, and fetching a user per row would turn a page into N requests.
 
 Both already existed. `N` is the row's `pending_review_count` — don't count the
 queue client-side just to label the button.
@@ -141,5 +150,7 @@ queue client-side just to label the button.
 - **Reminders.** Nothing nudges students who haven't submitted.
 - **Late-submission policy.** `available_to` decides the badge; it does not
   block or flag a late hand-in.
-- **Rubrics.** `grading_type: "rubric"` is a valid value with no rubric model
-  behind it — it grades the same as `manual`.
+- **Rubric weighting in the score.** `GET`/`PUT /assessments/{id}/rubric/` now
+  stores criteria (`[{name, max_points}]`), and grading a rubric assessment is
+  rejected if the score exceeds the rubric total or the rubric is empty. What is
+  still absent is per-criterion marking — you submit one total, not a breakdown.

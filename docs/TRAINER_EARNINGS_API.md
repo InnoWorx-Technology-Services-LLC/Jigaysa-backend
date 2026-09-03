@@ -71,7 +71,7 @@ Amounts are **decimal strings** — parse as decimals, never `parseFloat` a tota
 | `this_month` | net earned since the 1st |
 | `lifetime` | net earned, all time |
 | `pending_payout` | earned and not yet paid — no payout, or a payout still `pending` |
-| `average_per_course` | `lifetime ÷ earning_courses` |
+| `average_per_course` | `lifetime ÷ earning_courses`, or **`null`** when nothing has earned |
 
 **`average_per_course` divides by courses that actually earned**, not by every
 course published. Dividing by all of them measures how much someone publishes,
@@ -156,6 +156,11 @@ been paid is `payout_status`.
 `PUT` takes the same four fields. Use `is_set` for the empty state rather than
 guessing from four possibly-blank strings.
 
+**`DELETE` clears them.** It returns the now-empty card (`200`, not `204`) so the
+page can re-render from the response. Clearing is its own verb rather than a
+`PUT` of blanks, so "remove my details" cannot happen by accident from a
+half-filled form.
+
 > ### ⚠️ This records where you *say* payouts should go
 >
 > It does not connect to a bank, and it **deliberately does not accept a full
@@ -195,7 +200,6 @@ again.
 ## 9. Not in this release
 
 - **Actually sending money.** No payout processor. See §6.
-- **Marking a payout paid.** No endpoint; do it in Django admin.
 - **Statements and tax forms.** The page blurb mentions both; neither exists.
 - **Partial refund reversal.** A refund reverses the order's earnings in full.
   A partial refund currently reverses the whole line, which over-corrects — fine

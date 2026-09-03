@@ -79,6 +79,26 @@ class LoginView(TokenObtainPairView):
 
         user = User.objects.filter(email=email).first()
         LoginActivity.objects.create(user=user, success=True, **common)
+
+        # Two-factor: the password was right, and on an opted-in account that is
+        # no longer sufficient. Hold the tokens back and send a code instead.
+        # Accounts without it see no change at all — which is why this branch is
+        # here rather than in a separate endpoint the frontend has to know about
+        # in advance.
+        if user is not None and user.two_factor_enabled and user.phone:
+            from accounts.security import send_login_otp
+
+            hint = send_login_otp(user)
+            return Response(
+                {
+                    "otp_required": True,
+                    "phone_hint": hint,
+                    "detail": (
+                        f"Enter the code sent to {hint} at "
+                        "/auth/otp/verify/ to finish signing in."
+                    ),
+                }
+            )
         return response
 
 

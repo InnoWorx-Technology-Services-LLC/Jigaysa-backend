@@ -218,14 +218,33 @@ class AnswerSerializer(serializers.ModelSerializer):
 
 
 class SubmissionSerializer(serializers.ModelSerializer):
+    """A submission, with the student inlined.
+
+    The name and email travel with the row because the only screen that reads
+    this list is a grading queue, and a queue that says "student: 12" cannot be
+    worked. Mirrors how ``AdminPayoutSerializer`` inlines the trainer.
+    """
+
     answers = AnswerSerializer(many=True, read_only=True)
+    student_name = serializers.CharField(
+        source="student.full_name", read_only=True, default=""
+    )
+    student_email = serializers.EmailField(
+        source="student.email", read_only=True
+    )
+    assessment_title = serializers.CharField(
+        source="assessment.title", read_only=True
+    )
 
     class Meta:
         model = Submission
         fields = (
             "id",
             "assessment",
+            "assessment_title",
             "student",
+            "student_name",
+            "student_email",
             "enrollment",
             "attempt_no",
             "status",

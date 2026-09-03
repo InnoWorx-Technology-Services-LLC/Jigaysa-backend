@@ -250,3 +250,71 @@ class SuspendSerializer(serializers.Serializer):
     reason = serializers.CharField(
         required=False, allow_blank=True, max_length=500
     )
+
+
+# --------------------------------------------------------------------------- #
+# Account security: password change, sessions, two-factor
+# --------------------------------------------------------------------------- #
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    """Body of ``POST /auth/change-password/``.
+
+    The current password is required and is the whole point: without it, a
+    stolen access token would be enough to take an account permanently.
+    """
+
+    current_password = serializers.CharField(
+        write_only=True, style={"input_type": "password"}
+    )
+    new_password = serializers.CharField(
+        write_only=True, style={"input_type": "password"}
+    )
+
+    def validate_new_password(self, value):
+        validate_password(value)
+        return value
+
+
+class ActiveSessionSerializer(serializers.Serializer):
+    """One live refresh token — as close to "a session" as a JWT API has.
+
+    No device or IP: nothing records them when a token is issued, and inventing
+    a "Chrome on Windows" label we cannot substantiate would be worse than
+    leaving the column out.
+    """
+
+    id = serializers.IntegerField()
+    created_at = serializers.DateTimeField()
+    expires_at = serializers.DateTimeField()
+
+
+class TwoFactorStatusSerializer(serializers.Serializer):
+    """The state of two-factor on this account.
+
+    ``can_enable`` is false without a phone number on the profile, which is the
+    only prerequisite — surface it rather than letting the button fail.
+    """
+
+    enabled = serializers.BooleanField()
+    method = serializers.CharField(allow_blank=True)
+    phone_hint = serializers.CharField(allow_blank=True)
+    can_enable = serializers.BooleanField()
+
+
+class TwoFactorToggleSerializer(serializers.Serializer):
+    """Body of ``DELETE /auth/2fa/`` — the password, not a code.
+
+    Asking for a code to switch this off would be exactly wrong: a lost phone is
+    when someone most needs to turn it off.
+    """
+
+    password = serializers.CharField(
+        write_only=True, style={"input_type": "password"}
+    )
+
+
+class TwoFactorConfirmSerializer(serializers.Serializer):
+    """Body of ``POST /auth/2fa/confirm/``."""
+
+    code = serializers.CharField(min_length=4, max_length=8)

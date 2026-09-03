@@ -97,10 +97,14 @@ class EarningsSummaryView(APIView):
                     "this_month": totals["this_month"] or Decimal("0"),
                     "lifetime": lifetime,
                     "pending_payout": totals["pending"] or Decimal("0"),
+                    # Null, not zero, when nothing has earned yet — the same
+                    # rule the assignment stats follow. "No average" and "an
+                    # average of nothing" are different statements about
+                    # somebody's income.
                     "average_per_course": (
                         services.money(lifetime / earning_courses)
                         if earning_courses
-                        else Decimal("0")
+                        else None
                     ),
                     "earning_courses": earning_courses,
                     "share_pct": share,
@@ -289,6 +293,34 @@ class BankAccountView(APIView):
 
         for field, value in body.validated_data.items():
             setattr(profile, f"payout_{field}", value)
+        profile.save(
+            update_fields=[
+                "payout_bank_name", "payout_account_last4",
+                "payout_account_type", "payout_account_holder", "updated_at",
+            ]
+        )
+        return Response(
+            BankAccountSerializer(profile).data, status=status.HTTP_200_OK
+        )
+
+    @extend_schema(responses=BankAccountSerializer)
+    def delete(self, request):
+        """Clear the bank details.
+
+        ``PUT`` requires a bank name and four digits, which is right for setting
+        one and wrong for removing one — it left the card write-once, with no way
+        for a trainer to take their details off the platform. Deleting is its own
+        verb rather than a ``PUT`` of blanks, so "remove this" cannot happen by
+        accident from a half-filled form.
+
+        Returns the now-empty card (``200``) rather than ``204``, so the page can
+        re-render from the response instead of refetching.
+        """
+        profile = self._profile(request)
+        profile.payout_bank_name = ""
+        profile.payout_account_last4 = ""
+        profile.payout_account_type = ""
+        profile.payout_account_holder = ""
         profile.save(
             update_fields=[
                 "payout_bank_name", "payout_account_last4",

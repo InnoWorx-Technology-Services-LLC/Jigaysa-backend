@@ -1,7 +1,7 @@
 from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView
 
-from accounts import views
+from accounts import security, views
 
 app_name = "accounts"
 
@@ -25,5 +25,23 @@ urlpatterns = [
         "password-reset/confirm/",
         views.PasswordResetConfirmView.as_view(),
         name="password-reset-confirm",
+    ),
+    # --- Account security: signed-in user acting on their own account ------ #
+    path(
+        "change-password/",
+        security.ChangePasswordView.as_view(),
+        name="change-password",
+    ),
+    path("sessions/", security.ActiveSessionListView.as_view(), name="sessions"),
+    path(
+        "sessions/<int:pk>/",
+        security.ActiveSessionDetailView.as_view(),
+        name="session-detail",
+    ),
+    path("2fa/", security.TwoFactorView.as_view(), name="two-factor"),
+    path(
+        "2fa/confirm/",
+        security.TwoFactorConfirmView.as_view(),
+        name="two-factor-confirm",
     ),
 ]

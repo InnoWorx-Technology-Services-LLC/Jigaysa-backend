@@ -41,6 +41,10 @@ class User(AbstractBaseUser, PermissionsMixin, TimeStampedModel):
 
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
+    #: Opt-in second factor on login, delivered as an SMS code to ``phone``.
+    #: Off by default, so the login contract is unchanged for everyone who has
+    #: not turned it on — see ``accounts.security``.
+    two_factor_enabled = models.BooleanField(default=False)
 
     objects = UserManager()
 
