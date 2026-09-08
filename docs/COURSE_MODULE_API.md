@@ -251,7 +251,9 @@ Reorder by PATCHing `order`. `PUT`/`PATCH`/`DELETE` on `/modules/{id}/` and
 `coding` · `file`.
 
 **`200`** → the saved questions **including `is_correct`**, plus generated ids.
-`Assessment.total_questions` is updated.
+`Assessment.total_questions` is updated — it is derived from the question
+rows, so it always equals the number of questions the API returns, including
+when you save an empty set to clear them.
 
 **`GET /assessments/{id}/questions/`** returns the set with the answer key —
 **trainer/admin only** (`403` for students, who get the key-free shape from

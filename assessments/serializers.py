@@ -137,7 +137,10 @@ class QuestionAuthorSerializer(serializers.ModelSerializer):
         choices = validated_data.pop("choices", [])
         question = Question.objects.create(**validated_data)
         self._write_choices(question, choices)
-        _sync_question_count(question.assessment)
+        # ``assessment.total_questions`` is not touched here: a post_save
+        # receiver rebuilds it (see assessments.signals). Doing it here as well
+        # only worked for the paths that remembered to — deleting the whole set
+        # did not, and left the count stranded above zero.
         return question
 
     def update(self, instance, validated_data):
@@ -148,12 +151,6 @@ class QuestionAuthorSerializer(serializers.ModelSerializer):
         if choices is not None:
             self._write_choices(instance, choices)
         return instance
-
-
-def _sync_question_count(assessment):
-    Assessment.objects.filter(pk=assessment.pk).update(
-        total_questions=assessment.questions.count()
-    )
 
 
 class QuestionBulkSerializer(serializers.Serializer):

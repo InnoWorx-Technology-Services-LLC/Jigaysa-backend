@@ -273,3 +273,102 @@ def test_authored_questions_are_gradable_end_to_end(trainer, quiz, student):
     )
     assert resp.status_code in (status.HTTP_200_OK, status.HTTP_201_CREATED)
     assert resp.data["percent"] == 100
+
+
+# --- total_questions stays equal to the questions that exist -----------------
+#
+# The field is denormalised, so every one of these is really the same question:
+# can the stored number and the rows it counts ever disagree? They could, and
+# did — "Final quiz" served ``total_questions: 2`` with an empty question list.
+
+
+def _save_two_questions(trainer, quiz):
+    """Put the assessment in the state the editor leaves behind: 2 saved questions.
+
+    Established through the API rather than the fixture on purpose. The count
+    has to be genuinely non-zero going in, or a test that ends at zero passes
+    for the wrong reason — the fixture builds its questions with the ORM and
+    leaves the stored count at its ``0`` default.
+    """
+    resp = _api(trainer).post(
+        f"/api/v1/assessments/{quiz.id}/questions/",
+        {
+            "questions": [
+                {
+                    "question_type": "mcq",
+                    "text": "First?",
+                    "choices": [
+                        {"text": "yes", "is_correct": True},
+                        {"text": "no", "is_correct": False},
+                    ],
+                },
+                {
+                    "question_type": "mcq",
+                    "text": "Second?",
+                    "choices": [
+                        {"text": "yes", "is_correct": True},
+                        {"text": "no", "is_correct": False},
+                    ],
+                },
+            ]
+        },
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_200_OK
+    quiz.refresh_from_db()
+    assert quiz.total_questions == 2
+    return quiz
+
+
+def test_saving_an_empty_question_set_zeroes_the_count(trainer, quiz):
+    """Clearing the editor must take the count down with it.
+
+    This is the regression, and the shape "Final quiz" was found in: the
+    re-count ran once per *created* question, so a payload with no questions
+    deleted all of them and skipped it entirely, stranding the old number.
+    """
+    _save_two_questions(trainer, quiz)
+
+    resp = _api(trainer).post(
+        f"/api/v1/assessments/{quiz.id}/questions/", {"questions": []}, format="json"
+    )
+
+    assert resp.status_code == status.HTTP_200_OK
+    quiz.refresh_from_db()
+    assert quiz.questions.count() == 0
+    assert quiz.total_questions == 0
+
+
+def test_deleting_one_question_decrements_the_count(quiz):
+    """A plain ORM delete counts too — not every write goes through the editor."""
+    quiz.questions.first().delete()
+
+    quiz.refresh_from_db()
+    assert quiz.total_questions == quiz.questions.count() == 1
+
+
+def test_creating_questions_directly_sets_the_count(trainer, quiz):
+    """Building an assessment in the shell or a seed script keeps it honest.
+
+    ``seed_demo`` used to pass ``total_questions`` by hand and got it wrong; the
+    count now comes from the rows whether or not the caller thinks about it.
+    """
+    Question.objects.create(
+        assessment=quiz, text="3+3?", question_type=Question.QuestionType.MCQ
+    )
+
+    quiz.refresh_from_db()
+    assert quiz.total_questions == quiz.questions.count() == 3
+
+
+def test_student_detail_never_advertises_questions_it_does_not_return(
+    trainer, student, quiz
+):
+    """The bug as the student panel saw it: a count with nothing behind it."""
+    _save_two_questions(trainer, quiz)
+    quiz.questions.all().delete()
+
+    resp = _api(student).get(f"/api/v1/assessments/{quiz.id}/")
+
+    assert resp.status_code == status.HTTP_200_OK
+    assert resp.data["total_questions"] == len(resp.data["questions"]) == 0

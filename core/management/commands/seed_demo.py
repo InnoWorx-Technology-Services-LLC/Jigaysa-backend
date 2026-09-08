@@ -277,18 +277,21 @@ class Command(BaseCommand):
         )
 
         # ---- Assessments -------------------------------------------------
+        # No ``total_questions`` here on purpose: it is derived from the
+        # question rows (assessments.signals). Seeding it by hand is how
+        # "Final quiz" ended up claiming 2 questions it never had.
         checkpoint = Assessment.objects.get_or_create(
             course=ds, title="Foundations checkpoint",
             defaults={"trainer": kapoor, "assessment_type": Assessment.AssessmentType.QUIZ,
                       "time_limit_minutes": 10, "pass_percent": 70, "max_attempts": 3,
-                      "is_published": True, "total_questions": 3,
+                      "is_published": True,
                       "lesson": ds_lessons[3]},
         )[0]
         final_quiz = Assessment.objects.get_or_create(
             course=ds, title="Final quiz",
             defaults={"trainer": kapoor, "assessment_type": Assessment.AssessmentType.QUIZ,
                       "time_limit_minutes": 20, "pass_percent": 60, "max_attempts": 2,
-                      "is_published": True, "total_questions": 2,
+                      "is_published": True,
                       "lesson": ds_lessons[-1]},
         )[0]
         practice = Assessment.objects.get_or_create(

@@ -352,8 +352,11 @@ def test_the_split_always_sums_to_a_hundred(trainer):
 def test_an_empty_platform_reports_zeros(trainer):
     data = _api(trainer).get(SUMMARY_URL).data
     assert Decimal(data["lifetime"]) == 0
-    assert Decimal(data["average_per_course"]) == 0
     assert data["earning_courses"] == 0
+    # Null, not zero: there is no average when nothing has earned. Changed at
+    # the frontend team's request so this matches ``average_score``, which
+    # already behaved this way.
+    assert data["average_per_course"] is None
 
 
 def test_average_per_course_ignores_courses_that_never_sold(
