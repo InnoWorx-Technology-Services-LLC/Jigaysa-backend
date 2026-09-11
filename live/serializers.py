@@ -140,8 +140,19 @@ class SessionDoubtSerializer(serializers.ModelSerializer):
             "text",
             "status",
             "asked_at",
+            "answer",
+            "answered_at",
         )
-        read_only_fields = ("student", "status", "asked_at")
+        # ``status`` and ``answer`` are the only things a trainer changes here.
+        # ``status`` used to sit in this tuple, which made the viewset's own
+        # documented "PATCH status to answered" a silent no-op.
+        #
+        # ``session`` and ``text`` are read-only for the opposite reason: they
+        # were writable, so the trainer answering a doubt could rewrite the
+        # student's question or move it onto another session.
+        read_only_fields = (
+            "student", "asked_at", "answered_at", "session", "text",
+        )
 
 
 class TrainerAvailabilitySerializer(serializers.ModelSerializer):

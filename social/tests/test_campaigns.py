@@ -741,3 +741,95 @@ def test_a_disconnected_account_fails_its_post_without_crashing(
     assert post.account_id is None
     assert post.provider == Provider.LINKEDIN  # the row still reads sensibly
     assert "disconnected" in post.error
+
+
+# --------------------------------------------------------------------------- #
+# Custom (uploaded) campaign image
+# --------------------------------------------------------------------------- #
+
+BUCKET_URL = "https://pub-abc123.r2.dev/promo-banners/1/2026/09/deadbeef-banner.png"
+
+
+@pytest.fixture
+def own_bucket(settings):
+    settings.AWS_STORAGE_BUCKET_NAME = "test-bucket"
+    settings.AWS_S3_CUSTOM_DOMAIN = "pub-abc123.r2.dev"
+    return settings
+
+
+def test_custom_image_url_is_used_as_the_posted_art(
+    api, trainer, course, linkedin, own_bucket, stub_publish
+):
+    stub_publish()
+    resp = _create(
+        api, trainer, course, [linkedin],
+        image_source="custom", image_url=BUCKET_URL,
+    )
+    assert resp.status_code == status.HTTP_201_CREATED
+    assert resp.data["image_source"] == "custom"
+    assert resp.data["image_url"] == BUCKET_URL
+
+
+def test_custom_image_satisfies_instagrams_image_requirement(
+    api, trainer, instagram, own_bucket, stub_publish, trainer_course_without_cover
+):
+    """The whole point of the feature: a cover-less course can reach Instagram."""
+    stub_publish()
+    resp = _create(
+        api, trainer, trainer_course_without_cover, [instagram],
+        image_source="custom", image_url=BUCKET_URL,
+    )
+    assert resp.status_code == status.HTTP_201_CREATED
+
+
+@pytest.fixture
+def trainer_course_without_cover(trainer):
+    return Course.objects.create(
+        title="Course With No Cover",
+        trainer=trainer,
+        is_free=True,
+        thumbnail="",
+        status=Course.Status.PUBLISHED,
+    )
+
+
+def test_instagram_still_refused_when_there_is_no_image_at_all(
+    api, trainer, instagram, own_bucket, trainer_course_without_cover
+):
+    resp = _create(
+        api, trainer, trainer_course_without_cover, [instagram], image_source="none"
+    )
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST
+
+
+def test_foreign_image_url_is_refused(
+    api, trainer, course, linkedin, own_bucket
+):
+    """An arbitrary host would be an SSRF and would let a caller put anybody's
+    content on our trainer's feed."""
+    resp = _create(
+        api, trainer, course, [linkedin],
+        image_source="custom", image_url="https://evil.example.com/x.png",
+    )
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST
+    assert "image_url" in resp.data
+
+
+def test_custom_source_without_a_url_is_refused(
+    api, trainer, course, linkedin, own_bucket
+):
+    resp = _create(api, trainer, course, [linkedin], image_source="custom")
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST
+    assert "image_url" in resp.data
+
+
+def test_stray_image_url_cannot_override_a_thumbnail_choice(
+    api, trainer, course, linkedin, own_bucket, stub_publish
+):
+    stub_publish()
+    resp = _create(
+        api, trainer, course, [linkedin],
+        image_source="thumbnail", image_url=BUCKET_URL,
+    )
+    assert resp.status_code == status.HTTP_201_CREATED
+    assert resp.data["image_url"] == course.thumbnail

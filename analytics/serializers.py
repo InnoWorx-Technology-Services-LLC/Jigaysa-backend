@@ -138,3 +138,17 @@ class DoubtSerializer(serializers.Serializer):
     student_name = serializers.CharField(allow_blank=True)
     session_title = serializers.CharField(allow_blank=True)
     course = serializers.CharField(allow_blank=True)
+    answer = serializers.CharField(allow_blank=True, default="")
+    answered_at = serializers.DateTimeField(allow_null=True, default=None)
+
+
+class DoubtAnswerSerializer(serializers.Serializer):
+    """Body of ``POST /trainer/analytics/doubts/{id}/answer/``."""
+
+    answer = serializers.CharField(max_length=10000)
+
+    def validate_answer(self, value):
+        answer = (value or "").strip()
+        if not answer:
+            raise serializers.ValidationError("Write an answer to send.")
+        return answer

@@ -18,6 +18,7 @@ another's objects: ``{purpose}/{user_id}/{yyyy}/{mm}/{uuid}-{safe-filename}``.
 
 import os
 import uuid
+from urllib.parse import urlparse
 
 import boto3
 from botocore.config import Config
@@ -40,6 +41,11 @@ UPLOAD_PURPOSES = {
     "assignment": "submissions",
     "recording": "recordings",
     "message_attachment": "attachments",
+    # Social/promo artwork. Kept out of "course-thumbnails" because a banner
+    # composed for one post is not the course's cover: filing it there would
+    # leave the two indistinguishable the next time somebody cleans the bucket.
+    "promo_banner": "promo-banners",
+    "social_image": "social-images",
 }
 
 
@@ -121,6 +127,43 @@ def generate_presigned_download(key: str, expires: int = None) -> str:
         )
     except (BotoCoreError, ClientError) as exc:  # pragma: no cover - network
         raise StorageError(str(exc)) from exc
+
+
+def storage_hosts() -> set:
+    """Every hostname that can serve an object out of our own bucket."""
+    hosts = set()
+    if settings.AWS_S3_CUSTOM_DOMAIN:
+        hosts.add(settings.AWS_S3_CUSTOM_DOMAIN.split("/")[0].lower())
+    if settings.AWS_S3_ENDPOINT_URL:
+        endpoint = urlparse(settings.AWS_S3_ENDPOINT_URL).netloc.lower()
+        if endpoint:
+            hosts.add(endpoint)
+    bucket = settings.AWS_STORAGE_BUCKET_NAME
+    # Only when we are actually on AWS. With an endpoint override the bucket
+    # lives on R2 (or MinIO), and allowlisting the S3 hostname for that bucket
+    # name would trust a host we do not own — on R2 the region is "auto", so
+    # the entry is not even a real hostname.
+    if bucket and not settings.AWS_S3_ENDPOINT_URL:
+        hosts.add(f"{bucket}.s3.{settings.AWS_S3_REGION_NAME}.amazonaws.com".lower())
+    return hosts
+
+
+def is_own_storage_url(url: str) -> bool:
+    """Whether ``url`` addresses an object in our own bucket.
+
+    Anything that takes a URL from a client and later hands it to a third
+    party — a social network fetching a post image, say — has to ask this
+    first. An unchecked URL is both an SSRF and a way to make our own posts
+    carry somebody else's content, and neither is visible in review once the
+    field is merely a ``URLField``.
+    """
+    try:
+        parts = urlparse(url or "")
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https"):
+        return False
+    return parts.netloc.lower() in storage_hosts()
 
 
 def public_url(key: str) -> str:

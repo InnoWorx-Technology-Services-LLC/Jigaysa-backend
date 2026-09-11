@@ -131,6 +131,11 @@ class Campaign(TimeStampedModel):
     class ImageSource(models.TextChoices):
         THUMBNAIL = "thumbnail", "Course thumbnail"
         PROMO_CARD = "promo_card", "Auto promo card"
+        #: An image the caller uploaded and is supplying by URL. Distinct from
+        #: ``THUMBNAIL`` on purpose: both end up in ``image_url``, and without
+        #: a separate value the row cannot say whether the art came from the
+        #: course cover or was chosen for this one post.
+        CUSTOM = "custom", "Uploaded image"
         NONE = "none", "No image"
 
     #: Statuses a trainer is still allowed to edit or cancel. Once a single

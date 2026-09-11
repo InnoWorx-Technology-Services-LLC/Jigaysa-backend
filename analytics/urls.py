@@ -56,4 +56,9 @@ urlpatterns = [
         trainer_api.TrainerDoubtsView.as_view(),
         name="trainer-doubts",
     ),
+    path(
+        "trainer/analytics/doubts/<int:pk>/answer/",
+        trainer_api.TrainerDoubtAnswerView.as_view(),
+        name="trainer-doubt-answer",
+    ),
 ]

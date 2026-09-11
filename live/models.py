@@ -246,8 +246,41 @@ class SessionDoubt(TimeStampedModel):
     )
     asked_at = models.DateTimeField(auto_now_add=True)
 
+    #: The trainer's reply. Stored rather than only flipping ``status`` because
+    #: a doubt marked answered with no answer anywhere is indistinguishable
+    #: from one that was dismissed — the student has no way to read what they
+    #: were told, and the queue loses its only record of the exchange.
+    answer = models.TextField(blank=True)
+    answered_at = models.DateTimeField(null=True, blank=True)
+    answered_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="answered_doubts",
+    )
+
     class Meta:
         ordering = ["asked_at"]
 
     def __str__(self):
         return f"Doubt by {self.student} @ {self.session}"
+
+    def mark_answered(self, answer: str, by=None):
+        """Record a reply and close the doubt, in one write.
+
+        Kept on the model so the analytics endpoint and any future path (the
+        session viewset, an admin action) cannot disagree about what
+        "answered" means — the status and the text have to move together or
+        the queue starts lying.
+        """
+        self.answer = answer
+        self.answered_by = by
+        self.answered_at = timezone.now()
+        self.status = self.Status.ANSWERED
+        self.save(
+            update_fields=[
+                "answer", "answered_by", "answered_at", "status", "updated_at",
+            ]
+        )
+        return self

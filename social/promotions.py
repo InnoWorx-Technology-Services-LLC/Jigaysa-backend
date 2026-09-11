@@ -452,6 +452,13 @@ def image_options(facts) -> list:
             "note": "" if PROMO_CARD_AVAILABLE else "Not available on this server yet.",
         },
         {
+            "value": "custom",
+            "label": "Uploaded image",
+            "available": True,
+            "url": "",
+            "note": "Upload an image, then send its URL as image_url.",
+        },
+        {
             "value": "none",
             "label": "No image",
             "available": True,
@@ -461,8 +468,15 @@ def image_options(facts) -> list:
     ]
 
 
-def resolve_image(facts, source: str) -> str:
-    """The URL a campaign will actually post, for a chosen source."""
+def resolve_image(facts, source: str, custom_url: str = "") -> str:
+    """The URL a campaign will actually post, for a chosen source.
+
+    ``custom_url`` is only consulted for the ``custom`` source, so a stray URL
+    sent alongside ``thumbnail`` or ``none`` cannot quietly override the choice
+    the trainer actually made in the wizard.
+    """
     if source == "thumbnail":
         return facts.image_url
+    if source == "custom":
+        return custom_url
     return ""

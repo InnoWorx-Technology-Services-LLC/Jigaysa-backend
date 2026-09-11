@@ -127,6 +127,13 @@ class Command(BaseCommand):
         ananya = make_user("ananya@jigyasa.local", "Ananya R.", Role.STUDENT)
         karan = make_user("karan@jigyasa.local", "Karan M.", Role.STUDENT)
         priya = make_user("priya@jigyasa.local", "Priya S.", Role.STUDENT)
+        # The institution portal is the fourth role in ``Role`` and had no
+        # seeded login, so there was no way to open it at all. Attached to the
+        # org above because that is the only thing the role can administer.
+        make_user(
+            "institute@jigyasa.local", "Acme Institute Admin", Role.INSTITUTION,
+            organization=org,
+        )
 
         # ---- Profiles ----------------------------------------------------
         UserProfile.objects.get_or_create(

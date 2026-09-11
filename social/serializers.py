@@ -9,6 +9,8 @@ server.
 from django.utils import timezone
 from rest_framework import serializers
 
+from core import storage
+
 from courses.models import Course
 from social import promotions, providers
 from social.models import Campaign, CampaignPost, Provider, SocialAccount
@@ -242,6 +244,12 @@ class CampaignCreateSerializer(serializers.Serializer):
         required=False,
         default=Campaign.ImageSource.THUMBNAIL,
     )
+    #: Used only with ``image_source="custom"``. Upload the file through
+    #: ``/uploads/presign/`` (purpose ``promo_banner`` or ``social_image``) and
+    #: send back the ``public_url`` it returned.
+    image_url = serializers.URLField(
+        required=False, allow_blank=True, default="", max_length=1024
+    )
     accounts = serializers.PrimaryKeyRelatedField(
         queryset=SocialAccount.objects.all(), many=True, allow_empty=False
     )
@@ -259,6 +267,22 @@ class CampaignCreateSerializer(serializers.Serializer):
         if not caption.strip():
             raise serializers.ValidationError("Write something to post.")
         return caption.strip()
+
+    def validate_image_url(self, url):
+        """Only URLs pointing at our own bucket.
+
+        The value is handed to Meta and LinkedIn to fetch, so an arbitrary
+        host here would let a caller make our account post anything at all,
+        and would turn the field into an SSRF vector besides. Uploading
+        through the presign endpoint is what makes a URL eligible.
+        """
+        url = (url or "").strip()
+        if url and not storage.is_own_storage_url(url):
+            raise serializers.ValidationError(
+                "That image isn't hosted on this platform. Upload it through "
+                "/uploads/presign/ first, then send the public_url it returns."
+            )
+        return url
 
     def validate_image_source(self, source):
         if (
@@ -307,7 +331,14 @@ class CampaignCreateSerializer(serializers.Serializer):
     def validate(self, attrs):
         """Cross-field rules the networks would otherwise enforce for us."""
         facts = promotions.course_facts(attrs["course"])
-        image_url = promotions.resolve_image(facts, attrs["image_source"])
+        source = attrs["image_source"]
+        custom_url = attrs.get("image_url", "")
+        if source == Campaign.ImageSource.CUSTOM and not custom_url:
+            raise serializers.ValidationError(
+                {"image_url": "Send the uploaded image's URL, or pick another "
+                              "image source."}
+            )
+        image_url = promotions.resolve_image(facts, source, custom_url)
 
         wants_instagram = any(
             a.provider == Provider.INSTAGRAM for a in attrs["accounts"]
@@ -319,7 +350,7 @@ class CampaignCreateSerializer(serializers.Serializer):
                     "course thumbnail, or drop Instagram from this campaign."
                 }
             )
-        if attrs["image_source"] == Campaign.ImageSource.THUMBNAIL and not image_url:
+        if source == Campaign.ImageSource.THUMBNAIL and not image_url:
             raise serializers.ValidationError(
                 {"image_source": "This course has no cover image to post."}
             )

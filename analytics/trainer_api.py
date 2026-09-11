@@ -17,11 +17,14 @@ admins is none — that is correct, and the admin view of the platform lives at
 
 from django.db.models import Avg, Case, Count, IntegerField, Q, Value, When
 from drf_spectacular.utils import OpenApiParameter, extend_schema
+from rest_framework import status as http_status
+from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from analytics.serializers import (
     CourseInsightSerializer,
+    DoubtAnswerSerializer,
     DoubtSerializer,
     TrainerSummarySerializer,
     TrainerTrendSerializer,
@@ -327,9 +330,65 @@ class TrainerDoubtsView(APIView):
                 "student_name": getattr(doubt.student, "full_name", "") or "",
                 "session_title": doubt.session.title,
                 "course": getattr(doubt.session.course, "title", "") or "",
+                "answer": doubt.answer,
+                "answered_at": doubt.answered_at,
             }
             for doubt in page
         ]
         return paginator.get_paginated_response(
             DoubtSerializer(rows, many=True).data
+        )
+
+
+class TrainerDoubtAnswerView(APIView):
+    """POST ``/trainer/analytics/doubts/{id}/answer/`` — reply to a doubt.
+
+    Body ``{"answer": "..."}``. Records the reply, stamps who wrote it and
+    when, and moves the doubt to ``answered``; returns the updated row in the
+    same shape the queue lists, so the caller can drop it straight back into
+    the list it came from.
+
+    The queue was read-only, which left the panel able to show a trainer
+    exactly what needed answering and give them no way to answer it.
+
+    Scoped to the caller's own sessions like every other endpoint in this
+    module: answering somebody else's doubt is a 404, not a 403, because the
+    trainer has no business knowing the row exists.
+    """
+
+    permission_classes = [TRAINER_OR_ADMIN]
+    serializer_class = DoubtAnswerSerializer
+    api_roles = ("trainer", "admin")
+
+    @extend_schema(
+        request=DoubtAnswerSerializer, responses=DoubtSerializer
+    )
+    def post(self, request, pk):
+        doubt = get_object_or_404(
+            SessionDoubt.objects.select_related(
+                "session", "session__course", "student"
+            ),
+            pk=pk,
+            session__trainer=request.user,
+        )
+        body = DoubtAnswerSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+
+        doubt.mark_answered(body.validated_data["answer"], by=request.user)
+
+        return Response(
+            DoubtSerializer(
+                {
+                    "id": doubt.pk,
+                    "text": doubt.text,
+                    "status": doubt.status,
+                    "asked_at": doubt.asked_at,
+                    "student_name": getattr(doubt.student, "full_name", "") or "",
+                    "session_title": doubt.session.title,
+                    "course": getattr(doubt.session.course, "title", "") or "",
+                    "answer": doubt.answer,
+                    "answered_at": doubt.answered_at,
+                }
+            ).data,
+            status=http_status.HTTP_200_OK,
         )

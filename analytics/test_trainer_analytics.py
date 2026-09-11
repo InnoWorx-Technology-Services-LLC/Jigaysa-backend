@@ -343,3 +343,74 @@ def test_doubts_are_paginated(trainer, course, student):
     resp = _api(trainer).get(DOUBTS_URL)
     assert resp.data["count"] == 25
     assert len(resp.data["results"]) == 20
+
+
+# --------------------------------------------------------------------------- #
+# Answering a doubt
+# --------------------------------------------------------------------------- #
+
+
+def _answer_url(doubt):
+    return f"{DOUBTS_URL}{doubt.pk}/answer/"
+
+
+def test_answering_records_the_reply_and_closes_the_doubt(trainer, course, student):
+    doubt = _doubt(trainer, course, student, "How does useEffect cleanup work?")
+
+    resp = _api(trainer).post(
+        _answer_url(doubt), {"answer": "It runs before the next effect."},
+        format="json",
+    )
+
+    assert resp.status_code == status.HTTP_200_OK
+    assert resp.data["status"] == SessionDoubt.Status.ANSWERED
+    assert resp.data["answer"] == "It runs before the next effect."
+    assert resp.data["answered_at"] is not None
+
+    doubt.refresh_from_db()
+    assert doubt.status == SessionDoubt.Status.ANSWERED
+    assert doubt.answered_by_id == trainer.id
+
+
+def test_an_answered_doubt_leaves_the_open_queue(trainer, course, student):
+    doubt = _doubt(trainer, course, student, "Why is my build failing?")
+    _api(trainer).post(_answer_url(doubt), {"answer": "Pin the node version."},
+                       format="json")
+
+    resp = _api(trainer).get(DOUBTS_URL, {"status": "open"})
+    assert resp.data["count"] == 0
+
+
+def test_an_empty_answer_is_refused(trainer, course, student):
+    doubt = _doubt(trainer, course, student, "Anyone?")
+
+    resp = _api(trainer).post(_answer_url(doubt), {"answer": "   "}, format="json")
+
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST
+    doubt.refresh_from_db()
+    assert doubt.status == SessionDoubt.Status.OPEN
+
+
+def test_you_cannot_answer_another_trainers_doubt(trainer, rival, course, student):
+    theirs = Course.objects.create(title="Theirs", trainer=rival, is_free=True)
+    doubt = _doubt(rival, theirs, student, "Not yours")
+
+    resp = _api(trainer).post(_answer_url(doubt), {"answer": "Hijacked."},
+                              format="json")
+
+    assert resp.status_code == status.HTTP_404_NOT_FOUND
+    doubt.refresh_from_db()
+    assert doubt.status == SessionDoubt.Status.OPEN
+    assert doubt.answer == ""
+
+
+def test_students_cannot_answer_doubts(trainer, course, student):
+    doubt = _doubt(trainer, course, student, "Can I answer my own question?")
+
+    resp = _api(student).post(_answer_url(doubt), {"answer": "Yes."}, format="json")
+
+    assert resp.status_code in (
+        status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND
+    )
+    doubt.refresh_from_db()
+    assert doubt.status == SessionDoubt.Status.OPEN

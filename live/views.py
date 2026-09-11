@@ -293,7 +293,12 @@ class SessionDoubtViewSet(
         user = self.request.user
         if doubt.session.trainer_id != user.id and not _is_admin(user):
             raise PermissionDenied("Only the session trainer can update a doubt.")
-        serializer.save()
+        doubt = serializer.save()
+        # Route the close through the model so this path and the analytics
+        # answer endpoint stamp ``answered_at``/``answered_by`` identically —
+        # otherwise a doubt closed from here looks unanswered in the queue.
+        if doubt.status == SessionDoubt.Status.ANSWERED and doubt.answered_at is None:
+            doubt.mark_answered(doubt.answer, by=user)
 
 
 class TrainerAvailabilityViewSet(viewsets.ModelViewSet):

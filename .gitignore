@@ -33,3 +33,4 @@ htmlcov/
 .vscode/
 .DS_Store
 Thumbs.db
+ENV
