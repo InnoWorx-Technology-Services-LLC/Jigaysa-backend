@@ -673,6 +673,97 @@ class Command(BaseCommand):
             defaults={"gps": "18.5204,73.8567", "connectivity_status": "online",
                       "power_status": "battery 82%", "mobile_unit_id": "MU-07"})
 
+        # ---- The institution console (PRD §2.4) --------------------------
+        # Its own learners, deliberately not the four demo students above.
+        # Attaching those to an organisation would pull their threads out of
+        # the orgless public pool that the student community screens read from
+        # (see ``engagement.views.visible_threads``) — seeding the institution
+        # must not quietly empty a different demo screen.
+        #
+        # Dated **relative to today**, unlike the fixed 2026 dates elsewhere in
+        # this file. The console's headline tile counts batches whose window
+        # contains today, so fixed dates would make it read zero a few months
+        # after they were written — which is exactly what the hard-coded
+        # sample screen it replaces already did.
+        today = timezone.localdate()
+        inst_learners = [
+            make_user(f"{handle}@acme.local", name, Role.STUDENT,
+                      organization=org)
+            for handle, name in [
+                ("meera", "Meera Iyer"), ("arjun", "Arjun Nair"),
+                ("fatima", "Fatima Sheikh"), ("dev", "Dev Malhotra"),
+                ("sana", "Sana Qureshi"), ("rohit", "Rohit Deshmukh"),
+            ]
+        ]
+
+        inst_batches = []
+        for name, course_obj, offset_start, offset_end, cap in [
+            ("Batch A · CS 2025", react, -21, 45, 40),
+            ("Batch B · DS 2025", ds, -60, 10, 30),
+            ("Batch C · Lang 2025", ux, 14, 90, 25),
+            ("Batch Z · 2024 (closed)", fullstack, -365, -200, 20),
+        ]:
+            b = Batch.objects.get_or_create(
+                course=course_obj, name=name,
+                defaults={"trainer": kapoor, "organization": org,
+                          "capacity": cap,
+                          "start_date": today + timedelta(days=offset_start),
+                          "end_date": today + timedelta(days=offset_end)},
+            )[0]
+            inst_batches.append(b)
+
+        # Spread the learners across the three live batches with a range of
+        # progress, so "avg. completion" is a real average rather than one
+        # number repeated. ``Enrollment`` is unique per (student, course), so
+        # each learner takes a different course.
+        for learner, batch, pct in [
+            (inst_learners[0], inst_batches[0], 72),
+            (inst_learners[1], inst_batches[0], 64),
+            (inst_learners[2], inst_batches[1], 45),
+            (inst_learners[3], inst_batches[1], 38),
+            (inst_learners[4], inst_batches[2], 91),
+            (inst_learners[5], inst_batches[2], 12),
+        ]:
+            Enrollment.objects.get_or_create(
+                student=learner, course=batch.course,
+                defaults={"status": Enrollment.Status.ACTIVE,
+                          "source": Enrollment.Source.INSTITUTION,
+                          "progress_pct": pct, "batch": batch},
+            )
+        for batch in inst_batches[:3]:
+            Batch.objects.filter(pk=batch.pk).update(
+                enrolled_count=batch.enrollments.count()
+            )
+
+        # An upcoming room booking, so the bookings panel is not empty. Also
+        # relative to today, for the same reason the batches are.
+        lecture_hall = Room.objects.get_or_create(
+            organization=org, name="Room 101",
+            defaults={"room_type": Room.RoomType.PHYSICAL, "capacity": 60,
+                      "location": "Pune Campus · Block A"})[0]
+        for title, batch, in_days, hour, dur in [
+            ("Batch A · live lecture", inst_batches[0], 3, 9, 180),
+            ("Batch B · lab session", inst_batches[1], 6, 14, 180),
+        ]:
+            ls = LiveSession.objects.get_or_create(
+                title=title,
+                defaults={"trainer": kapoor, "course": batch.course,
+                          "batch": batch,
+                          "session_type": LiveSession.SessionType.GROUP,
+                          "scheduled_start": timezone.make_aware(
+                              datetime.combine(
+                                  today + timedelta(days=in_days),
+                                  datetime.min.time().replace(hour=hour))),
+                          "duration_minutes": dur, "capacity": 60,
+                          "status": LiveSession.Status.SCHEDULED},
+            )[0]
+            ClassroomSession.objects.get_or_create(
+                room=lecture_hall, live_session=ls,
+                defaults={"remote_trainer": kapoor,
+                          "date": ls.scheduled_start,
+                          "status": ClassroomSession.Status.SCHEDULED},
+            )
+
         # ---- Analytics snapshot -----------------------------------------
         AnalyticsSnapshot.objects.get_or_create(
             scope=AnalyticsSnapshot.Scope.TRAINER, owner=kapoor,
