@@ -305,6 +305,26 @@ SOCIAL_COURSE_URL_PATH = env("SOCIAL_COURSE_URL_PATH", default="/courses/{slug}"
 TRAINER_PAYOUT_HOLD_DAYS = env.int("TRAINER_PAYOUT_HOLD_DAYS", default=7)
 
 
+# --- Live sessions: Jitsi (PRD §3.5) ----------------------------------------
+# Live classes run on a dedicated Jitsi instance at meet.jigaysa.com. Django
+# never touches media; it signs a short-lived JWT naming the room and the
+# caller's powers (see live.meeting).
+#
+# Leave JITSI_APP_SECRET empty to disable the integration: ``join`` then returns
+# the stored ``join_url`` exactly as before, the same way an empty
+# RAZORPAY_KEY_ID disables the payment gateway. That makes this safe to deploy
+# before the secret is in place.
+#
+# The secret must byte-match ``app_secret`` in the bridge's Prosody vhost. If
+# the two drift, every join fails with an opaque auth error and neither side's
+# logs say anything useful — check it first when debugging.
+JITSI_DOMAIN = env("JITSI_DOMAIN", default="")
+JITSI_APP_ID = env("JITSI_APP_ID", default="jigyasa")
+JITSI_APP_SECRET = env("JITSI_APP_SECRET", default="")
+# A join URL is a bearer credential, so it must not outlive the class it opens.
+JITSI_TOKEN_TTL_MINUTES = env.int("JITSI_TOKEN_TTL_MINUTES", default=240)
+
+
 # Internationalization
 # https://docs.djangoproject.com/en/6.0/topics/i18n/
 

@@ -18,6 +18,7 @@ from rest_framework.response import Response
 
 from accounts.models import User
 from courses.models import Enrollment
+from live import meeting
 from live.models import (
     IndividualBooking,
     LiveSession,
@@ -194,6 +195,18 @@ class LiveSessionViewSet(viewsets.ModelViewSet):
             registration.joined_at = timezone.now()
             registration.attended = True
             registration.save(update_fields=["joined_at", "attended", "updated_at"])
+
+        if meeting.is_enabled():
+            # Minted per call, never reused: the bridge refuses a join without a
+            # valid token, so this URL is the credential. Short-lived by design
+            # — see live.meeting.
+            join_url, room, _ = meeting.issue_join(session, request.user)
+            if session.meeting_id != room:
+                session.meeting_id = room
+                session.save(update_fields=["meeting_id", "updated_at"])
+            return Response({"join_url": join_url, "meeting_id": room})
+
+        # No Jitsi configured: hand back whatever was stored, unchanged.
         return Response(
             {"join_url": session.join_url, "meeting_id": session.meeting_id}
         )

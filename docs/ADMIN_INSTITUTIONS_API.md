@@ -42,6 +42,101 @@ POST  /admin/organizations/3/members/add/   { "users": [head_id] }
 Create the tenant, promote whoever runs it, attach them. Order doesn't matter.
 Then add the students with a second `members/add/` call.
 
+### Worked example — onboarding St. Xavier College
+
+**Step 0 — the head admin gets an account.** Not part of this API: they
+self-register through the public accounts endpoint (or an admin creates them
+in Django admin, per §8). They come out as `role: "student"`,
+`organization: null` — `"institution"` isn't self-registrable.
+
+```
+POST /auth/register/
+{ "email": "priya@stxaviers.edu", "full_name": "Priya Verma", "password": "…" }
+
+→ 201
+{ "id": 58, "email": "priya@stxaviers.edu", "full_name": "Priya Verma",
+  "role": "student", "phone": null }
+```
+
+**Step 1 — create the tenant.**
+
+```
+POST /admin/organizations/
+{ "name": "St. Xavier College", "type": "institution" }
+
+→ 201
+{ "id": 3, "name": "St. Xavier College", "slug": "st-xavier-college",
+  "type": "institution", "type_label": "Institution", "is_active": true,
+  "status": "active", "member_count": 0, "course_count": 0, … }
+```
+
+**Step 2 — promote user 58.** Order doesn't matter against Step 3 — this
+only touches `role`, not `organization`.
+
+```
+PATCH /admin/users/58/role/
+{ "role": "institution" }
+
+→ 200
+{ "id": 58, "email": "priya@stxaviers.edu", "role": "institution", … }
+```
+
+**Step 3 — attach them to org 3.** This only touches `organization`, not
+`role` — see §1.
+
+```
+POST /admin/organizations/3/members/add/
+{ "users": [58] }
+
+→ 200
+{ "added": 1, "reassigned_from_another_organization": [],
+  "members": [ { "id": 58, "email": "priya@stxaviers.edu",
+                 "role": "institution", … } ] }
+```
+
+Only once **both** Step 2 and Step 3 have run does user 58 function as St.
+Xavier College's admin — `role: "institution"` alone, with `organization:
+null`, isn't enough. From here, add the student roll with further
+`members/add/` calls (§7); they keep `role: "student"`.
+
+### Shortcut — the same thing in one call
+
+`POST /admin/organizations/onboard/` does Step 1 through 3 atomically, for the
+common case: a brand-new institution whose admin has no account yet. It
+**always creates a new user** — attaching an existing account, or a second
+admin, is still the three-call flow above.
+
+```json
+{
+  "name": "St. Xavier College",
+  "type": "institution",
+  "admin_email": "priya@stxaviers.edu",
+  "admin_full_name": "Priya Verma",
+  "admin_password": "…",
+  "admin_phone": "9876543210"
+}
+```
+
+`type` and `admin_phone` are optional (`type` defaults to `institution`).
+`admin_password` runs through Django's password validators, same as
+`/auth/register/`.
+
+```json
+→ 201
+{
+  "organization": { "id": 3, "name": "St. Xavier College",
+                     "slug": "st-xavier-college", "type": "institution",
+                     "member_count": 1, … },
+  "admin": { "id": 58, "email": "priya@stxaviers.edu", "full_name": "Priya Verma",
+             "role": "institution", … }
+}
+```
+
+`400` if the org name or the admin email is already taken — nothing is
+created on either side; the org and the user are written in one transaction.
+Priya logs in immediately afterwards with the email/password given here,
+exactly as in Step 5 of the manual flow.
+
 ---
 
 ## 3. `GET /admin/organizations/` — the list
@@ -180,9 +275,11 @@ courses they took.
 
 ## 8. Not in this release
 
-- **Creating a user from this screen.** You attach *existing* accounts. Invite
-  or bulk-create flows don't exist; people register themselves or an admin
-  creates them in Django admin.
+- **Creating anyone but the first admin.** `onboard/` (§2) creates exactly one
+  user — the institution's admin. Everyone else (the student roll, a second
+  admin) is still attached via `members/add/`, which only takes *existing*
+  account ids. There's no invite flow — a student registers themselves first,
+  or an admin creates them in Django admin.
 - **Bulk CSV import** of a member roll.
 - **Per-institution settings** — seat limits, contracts, billing. `Organization`
   has a name, a type and an active flag, and nothing else.

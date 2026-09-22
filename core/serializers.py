@@ -1,6 +1,7 @@
 """Serializers for the media-upload presign endpoints and platform settings."""
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 
 from core.models import Organization, PlatformSetting
@@ -183,6 +184,56 @@ class OrganizationWriteSerializer(serializers.ModelSerializer):
                 "An organization with that name already exists."
             )
         return name
+
+
+class OrganizationOnboardSerializer(serializers.Serializer):
+    """Body of ``POST /admin/organizations/onboard/``.
+
+    The three-call flow (create org, promote a user to ``institution``, attach
+    them) needs an existing account to promote. This is the shortcut for the
+    common case where the institution's admin has no account yet: one call
+    that creates the org, creates their login, and links them — atomically, so
+    a failure partway never leaves an org with no admin or a login with no
+    org. Attaching a *second* admin, or one who already registered, is still
+    the three-call flow — this endpoint always creates a brand-new user.
+    """
+
+    name = serializers.CharField(max_length=255)
+    type = serializers.ChoiceField(
+        choices=Organization.OrgType.choices,
+        default=Organization.OrgType.INSTITUTION,
+    )
+    admin_email = serializers.EmailField()
+    admin_full_name = serializers.CharField(max_length=255)
+    admin_password = serializers.CharField(
+        write_only=True, style={"input_type": "password"}
+    )
+    admin_phone = serializers.CharField(
+        max_length=20, required=False, allow_blank=True
+    )
+
+    def validate_name(self, value):
+        name = value.strip()
+        if not name:
+            raise serializers.ValidationError("Give the institution a name.")
+        if Organization.objects.filter(name__iexact=name).exists():
+            raise serializers.ValidationError(
+                "An organization with that name already exists."
+            )
+        return name
+
+    def validate_admin_email(self, value):
+        email = value.strip().lower()
+        if User.objects.filter(email__iexact=email).exists():
+            raise serializers.ValidationError(
+                "A user with that email already exists — attach them with "
+                "the existing members/add/ flow instead."
+            )
+        return email
+
+    def validate_admin_password(self, value):
+        validate_password(value)
+        return value
 
 
 class OrganizationMemberSerializer(serializers.ModelSerializer):

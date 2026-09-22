@@ -20,6 +20,7 @@ endpoint's job, and it stays a separate, deliberate call.
 """
 
 from django.contrib.auth import get_user_model
+from django.db import transaction
 from django.db.models import Count, Q
 from django.utils.text import slugify
 from drf_spectacular.utils import OpenApiParameter, extend_schema
@@ -32,6 +33,7 @@ from core.pagination import DefaultPagination
 from core.permissions import IsAdmin
 from core.serializers import (
     OrganizationMemberSerializer,
+    OrganizationOnboardSerializer,
     OrganizationSerializer,
     OrganizationWriteSerializer,
 )
@@ -281,3 +283,55 @@ class AdminOrganizationViewSet(
                 status=status.HTTP_404_NOT_FOUND,
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # --- one-call onboarding ------------------------------------------------ #
+
+    @extend_schema(
+        request=OrganizationOnboardSerializer,
+        responses={201: OrganizationSerializer},
+    )
+    @action(detail=False, methods=["post"])
+    def onboard(self, request):
+        """POST ``/admin/organizations/onboard/`` — create a tenant and its
+        admin's login in a single call.
+
+        The general flow is three separate calls (create org, promote a user
+        to ``institution``, attach them — see the module docstring), because
+        membership and role are deliberately independent decisions and the
+        user being promoted might already exist. This endpoint is the shortcut
+        for the common case: a brand-new institution whose admin has no
+        account yet. It always creates a new user — attaching an existing one,
+        or a second admin, still goes through ``members/add/`` and the role
+        endpoint.
+
+        Atomic: a validation failure on either half leaves neither the org nor
+        the user behind.
+        """
+        from accounts.models import Role  # local: avoid an app-load cycle
+
+        body = OrganizationOnboardSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        data = body.validated_data
+
+        with transaction.atomic():
+            org = Organization.objects.create(
+                name=data["name"],
+                type=data["type"],
+                slug=unique_slug(data["name"]),
+            )
+            admin_user = User.objects.create_user(
+                email=data["admin_email"],
+                password=data["admin_password"],
+                full_name=data["admin_full_name"],
+                phone=data.get("admin_phone", ""),
+                role=Role.INSTITUTION,
+                organization=org,
+            )
+
+        return Response(
+            {
+                "organization": self._read(org),
+                "admin": OrganizationMemberSerializer(admin_user).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )

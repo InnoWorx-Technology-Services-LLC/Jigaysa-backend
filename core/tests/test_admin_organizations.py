@@ -316,3 +316,76 @@ def test_onboarding_an_institution_takes_three_calls(admin):
     assert head.role == Role.INSTITUTION
     assert head.organization_id == org_id
     assert _api(admin).get(URL).data["results"][0]["member_count"] == 1
+
+
+def test_onboard_creates_org_and_admin_login_in_one_call(admin):
+    resp = _api(admin).post(
+        f"{URL}onboard/",
+        {
+            "name": "Nalanda Institute",
+            "type": "institution",
+            "admin_email": "principal@nalanda.edu",
+            "admin_full_name": "Dr. Principal",
+            "admin_password": "StrongPass123!",
+            "admin_phone": "9876543210",
+        },
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_201_CREATED
+
+    org = Organization.objects.get(pk=resp.data["organization"]["id"])
+    assert org.name == "Nalanda Institute"
+
+    head = User.objects.get(email="principal@nalanda.edu")
+    assert head.role == Role.INSTITUTION
+    assert head.organization_id == org.pk
+    assert head.phone == "9876543210"
+    assert head.check_password("StrongPass123!")
+
+    assert resp.data["admin"]["email"] == "principal@nalanda.edu"
+    assert resp.data["organization"]["member_count"] == 1
+
+
+def test_onboard_rejects_duplicate_org_name(admin, org):
+    resp = _api(admin).post(
+        f"{URL}onboard/",
+        {
+            "name": org.name,
+            "admin_email": "someone@example.com",
+            "admin_full_name": "Someone",
+            "admin_password": "StrongPass123!",
+        },
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST
+    assert not User.objects.filter(email="someone@example.com").exists()
+
+
+def test_onboard_rejects_an_email_already_in_use(admin, student):
+    resp = _api(admin).post(
+        f"{URL}onboard/",
+        {
+            "name": "Brand New Institute",
+            "admin_email": student.email,
+            "admin_full_name": "Someone Else",
+            "admin_password": "StrongPass123!",
+        },
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST
+    assert not Organization.objects.filter(name="Brand New Institute").exists()
+
+
+def test_onboard_is_admin_only():
+    caller = _user("not-admin@example.com", Role.STUDENT)
+    resp = _api(caller).post(
+        f"{URL}onboard/",
+        {
+            "name": "Some Institute",
+            "admin_email": "x@example.com",
+            "admin_full_name": "X",
+            "admin_password": "StrongPass123!",
+        },
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_403_FORBIDDEN
