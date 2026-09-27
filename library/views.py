@@ -14,6 +14,8 @@ from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
+from courses.models import Category
+from courses.serializers import CategorySerializer
 from library.models import LibraryBookmark, LibraryResource
 from library.serializers import (
     LibraryBookmarkSerializer,
@@ -38,8 +40,10 @@ def _is_author_role(user):
 class LibraryResourceViewSet(viewsets.ModelViewSet):
     """The training library catalog.
 
-    Filters (query params): ``format``, ``category`` (id), ``access_level``,
-    ``author`` (trainer id), ``course`` (id), ``q`` (title/description search).
+    Filters (query params): ``resource_format`` (video/ebook/notes/webinar/…
+    — note **not** ``format``, which DRF reserves for content negotiation),
+    ``category`` (id), ``access_level``, ``author`` (trainer id), ``course``
+    (id), ``q``/``search`` (title, description, category and author search).
     Ordering via ``ordering`` among ``popularity_score``, ``published_at``,
     ``views_count``, ``created_at`` (prefix ``-`` for descending; default is the
     model's popularity ordering).
@@ -78,15 +82,18 @@ class LibraryResourceViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = LibraryResource.objects.select_related("author", "category", "course")
         params = self.request.query_params
-        qs = _filter_by(qs, self.request, "format")
+        qs = _filter_by(qs, self.request, "resource_format", "format")
         qs = _filter_by(qs, self.request, "category", "category_id")
         qs = _filter_by(qs, self.request, "access_level")
         qs = _filter_by(qs, self.request, "author", "author_id")
         qs = _filter_by(qs, self.request, "course", "course_id")
-        if params.get("q"):
-            term = params["q"]
+        term = params.get("q") or params.get("search")
+        if term:
             qs = qs.filter(
-                Q(title__icontains=term) | Q(description__icontains=term)
+                Q(title__icontains=term)
+                | Q(description__icontains=term)
+                | Q(category__name__icontains=term)
+                | Q(author__full_name__icontains=term)
             )
         ordering = params.get("ordering")
         allowed = {
@@ -134,6 +141,19 @@ class LibraryResourceViewSet(viewsets.ModelViewSet):
             return Response({"bookmarked": False})
         LibraryBookmark.objects.create(user=request.user, resource=resource)
         return Response({"bookmarked": True}, status=status.HTTP_201_CREATED)
+
+
+class LibraryCategoryViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
+    """The category taxonomy library resources are filed under (id → name),
+    needed by clients before they can create a resource (``category: <id>``).
+    Shares the ``courses.Category`` taxonomy; reads are public, same as the
+    course catalog's own category list.
+    """
+
+    queryset = Category.objects.all()
+    serializer_class = CategorySerializer
+    api_roles = ("public",)
+    permission_classes = [AllowAny]
 
 
 class LibraryBookmarkViewSet(

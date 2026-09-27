@@ -22,6 +22,9 @@ from courses.models import (
     Course,
     CourseReview,
     Enrollment,
+    FeedbackForm,
+    FeedbackQuestion,
+    FeedbackResponse,
     Lesson,
     LessonNote,
     LessonProgress,
@@ -40,6 +43,8 @@ from courses.serializers import (
     CourseWriteSerializer,
     EnrollmentCreateSerializer,
     EnrollmentSerializer,
+    FeedbackFormSerializer,
+    FeedbackResponseSerializer,
     LessonNoteSerializer,
     LessonProgressSerializer,
     LessonResourceSerializer,
@@ -748,3 +753,143 @@ def _recompute_course_rating(course):
         rating_avg=round(agg["avg"] or 0, 2),
         rating_count=agg["count"] or 0,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Course feedback form
+# --------------------------------------------------------------------------- #
+
+
+class FeedbackFormViewSet(viewsets.ModelViewSet):
+    """The trainer's course feedback questionnaire. Filter by ``?course=<id>``.
+
+    Trainers build and read the form for their own courses; students see the
+    form only for courses they are enrolled in, so they can fill it in.
+    """
+
+    serializer_class = FeedbackFormSerializer
+    permission_classes = [IsAuthenticated, IsTrainerOwnerOrReadOnly]
+    api_roles = ALL_ROLES
+    api_roles_by_action = _AUTHORING_BY_ACTION
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = FeedbackForm.objects.select_related("course").prefetch_related(
+            "questions"
+        )
+        if not _is_admin(user):
+            qs = qs.filter(
+                Q(course__trainer=user)
+                | Q(is_active=True, course__enrollments__student=user)
+            ).distinct()
+        return _filter_by(qs, self.request, "course", "course_id")
+
+    def perform_create(self, serializer):
+        course = serializer.validated_data["course"]
+        user = self.request.user
+        if course.trainer_id != user.id and not _is_admin(user):
+            raise PermissionDenied("You can only add a form to your own course.")
+        serializer.save()
+
+    @action(detail=True, methods=["get"])
+    def summary(self, request, pk=None):
+        """Aggregated results for the trainer. Never exposes individual answers,
+        so it stays safe to show for an anonymous form."""
+        form = self.get_object()
+        if form.course.trainer_id != request.user.id and not _is_admin(request.user):
+            raise PermissionDenied("Only the course trainer can see results.")
+
+        submitted = form.responses.filter(submitted_at__isnull=False)
+        questions = []
+        for question in form.questions.all():
+            answers = question.answers.filter(
+                response__submitted_at__isnull=False
+            )
+            entry = {
+                "id": question.id,
+                "text": question.text,
+                "question_type": question.question_type,
+                "answered": answers.count(),
+            }
+            if question.question_type in FeedbackQuestion.NUMERIC_TYPES:
+                agg = answers.aggregate(avg=Avg("rating"))
+                entry["average"] = round(agg["avg"], 2) if agg["avg"] else 0
+                entry["distribution"] = {
+                    str(row["rating"]): row["n"]
+                    for row in answers.values("rating")
+                    .annotate(n=Count("id"))
+                    .order_by("rating")
+                }
+            elif question.question_type in (
+                FeedbackQuestion.QuestionType.CHOICE,
+                FeedbackQuestion.QuestionType.YES_NO,
+            ):
+                entry["distribution"] = {
+                    row["text"]: row["n"]
+                    for row in answers.values("text")
+                    .annotate(n=Count("id"))
+                    .order_by("-n")
+                }
+            else:
+                entry["responses"] = list(
+                    answers.exclude(text="").values_list("text", flat=True)[:200]
+                )
+            questions.append(entry)
+
+        return Response(
+            {
+                "form": form.id,
+                "course": form.course_id,
+                "response_count": submitted.count(),
+                "enrolled_count": form.course.enrolled_count,
+                "questions": questions,
+            }
+        )
+
+
+class FeedbackResponseViewSet(
+    mixins.CreateModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.ListModelMixin,
+    viewsets.GenericViewSet,
+):
+    """A student's submitted feedback. Filter by ``?form=<id>``.
+
+    Immutable once posted — a trainer acting on results should not have the
+    ground shift underneath them. Students see only their own submissions;
+    the course trainer sees all of them (anonymised when the form says so).
+    """
+
+    serializer_class = FeedbackResponseSerializer
+    permission_classes = [IsAuthenticated]
+    api_roles = ALL_ROLES
+    api_roles_by_action = {"create": ("student",)}
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = FeedbackResponse.objects.select_related(
+            "student", "form", "form__course"
+        ).prefetch_related("answers")
+        if not _is_admin(user):
+            qs = qs.filter(
+                Q(student=user) | Q(form__course__trainer=user)
+            ).distinct()
+        return _filter_by(qs, self.request, "form", "form_id")
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        form = serializer.validated_data["form"]
+        if not form.is_active:
+            raise ValidationError("This feedback form is closed.")
+
+        enrollment = Enrollment.objects.filter(
+            student=user, course=form.course
+        ).first()
+        if enrollment is None:
+            raise ValidationError("You must be enrolled to submit feedback.")
+        if form.require_completion and enrollment.completed_at is None:
+            raise ValidationError("Finish the course before giving feedback.")
+        if FeedbackResponse.objects.filter(form=form, student=user).exists():
+            raise ValidationError("You have already submitted this feedback.")
+
+        serializer.save(student=user, submitted_at=timezone.now())

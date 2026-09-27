@@ -70,14 +70,24 @@ class TagField(serializers.Field):
             raise serializers.ValidationError("Send tags as a list of names.")
         if len(data) > 5:
             raise serializers.ValidationError("A question can carry at most 5 tags.")
+        name_max = Tag._meta.get_field("name").max_length
+        slug_max = Tag._meta.get_field("slug").max_length
         tags = []
         for raw in data:
             name = str(raw).strip()
             if not name:
                 continue
+            if len(name) > name_max:
+                raise serializers.ValidationError(
+                    f"'{name}' is too long for a tag (max {name_max} characters)."
+                )
             slug = slugify(name)
             if not slug:
                 raise serializers.ValidationError(f"'{raw}' is not a usable tag.")
+            if len(slug) > slug_max:
+                raise serializers.ValidationError(
+                    f"'{name}' is too long for a tag (max {name_max} characters)."
+                )
             tag, _ = Tag.objects.get_or_create(slug=slug, defaults={"name": name})
             tags.append(tag)
         return tags

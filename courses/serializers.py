@@ -15,6 +15,10 @@ from courses.models import (
     Course,
     CourseReview,
     Enrollment,
+    FeedbackAnswer,
+    FeedbackForm,
+    FeedbackQuestion,
+    FeedbackResponse,
     Lesson,
     LessonNote,
     LessonProgress,
@@ -463,3 +467,206 @@ class CourseReviewSerializer(serializers.ModelSerializer):
         if not 1 <= value <= 5:
             raise serializers.ValidationError("Rating must be between 1 and 5.")
         return value
+
+
+# --------------------------------------------------------------------------- #
+# Course feedback form
+# --------------------------------------------------------------------------- #
+
+
+class FeedbackQuestionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FeedbackQuestion
+        fields = (
+            "id",
+            "question_type",
+            "text",
+            "help_text",
+            "is_required",
+            "order",
+            "options",
+        )
+
+    def validate(self, attrs):
+        question_type = attrs.get(
+            "question_type",
+            getattr(self.instance, "question_type", FeedbackQuestion.QuestionType.RATING),
+        )
+        options = attrs.get("options", getattr(self.instance, "options", []))
+        if question_type == FeedbackQuestion.QuestionType.CHOICE:
+            if not isinstance(options, list) or len(options) < 2:
+                raise serializers.ValidationError(
+                    {"options": "A choice question needs at least two options."}
+                )
+            if any(not str(option).strip() for option in options):
+                raise serializers.ValidationError(
+                    {"options": "Options cannot be blank."}
+                )
+        elif options:
+            raise serializers.ValidationError(
+                {"options": f"A {question_type} question does not take options."}
+            )
+        return attrs
+
+
+class FeedbackFormSerializer(serializers.ModelSerializer):
+    """The form and its questions travel together.
+
+    The builder screen saves the whole questionnaire in one go, and a form
+    persisted without its questions is not a state worth allowing.
+    """
+
+    questions = FeedbackQuestionSerializer(many=True, required=False)
+    response_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = FeedbackForm
+        fields = (
+            "id",
+            "course",
+            "title",
+            "description",
+            "is_active",
+            "is_anonymous",
+            "require_completion",
+            "questions",
+            "response_count",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("created_at", "updated_at")
+
+    def get_response_count(self, obj):
+        return obj.responses.filter(submitted_at__isnull=False).count()
+
+    def _write_questions(self, form, questions):
+        """Replace the question set wholesale — the builder always submits the
+        full list, and answers cascade with the question they belong to."""
+        form.questions.all().delete()
+        FeedbackQuestion.objects.bulk_create(
+            [
+                FeedbackQuestion(
+                    form=form,
+                    order=question.pop("order", index),
+                    **question,
+                )
+                for index, question in enumerate(questions)
+            ]
+        )
+
+    def create(self, validated_data):
+        questions = validated_data.pop("questions", [])
+        form = FeedbackForm.objects.create(**validated_data)
+        self._write_questions(form, questions)
+        return form
+
+    def update(self, instance, validated_data):
+        questions = validated_data.pop("questions", None)
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        instance.save()
+        if questions is not None:
+            self._write_questions(instance, questions)
+        return instance
+
+
+class FeedbackAnswerSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FeedbackAnswer
+        fields = ("id", "question", "rating", "text")
+
+
+class FeedbackResponseSerializer(serializers.ModelSerializer):
+    """A student's submission, answers nested. ``student`` comes from the
+    request, never the body."""
+
+    answers = FeedbackAnswerSerializer(many=True)
+    student = TrainerMiniSerializer(read_only=True)
+
+    class Meta:
+        model = FeedbackResponse
+        fields = (
+            "id",
+            "form",
+            "student",
+            "answers",
+            "submitted_at",
+            "created_at",
+        )
+        read_only_fields = ("student", "submitted_at", "created_at")
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if instance.form.is_anonymous:
+            data["student"] = None
+        return data
+
+    def validate(self, attrs):
+        form = attrs.get("form") or self.instance.form
+        answers = attrs.get("answers", [])
+        questions = {q.id: q for q in form.questions.all()}
+
+        seen = set()
+        for answer in answers:
+            question = answer["question"]
+            if question.id not in questions:
+                raise serializers.ValidationError(
+                    {"answers": f"Question {question.id} is not on this form."}
+                )
+            if question.id in seen:
+                raise serializers.ValidationError(
+                    {"answers": f"Question {question.id} answered twice."}
+                )
+            seen.add(question.id)
+            self._validate_answer(question, answer)
+
+        missing = [
+            q.id for q in questions.values() if q.is_required and q.id not in seen
+        ]
+        if missing:
+            raise serializers.ValidationError(
+                {"answers": f"Required questions unanswered: {missing}."}
+            )
+        return attrs
+
+    def _validate_answer(self, question, answer):
+        rating = answer.get("rating")
+        text = (answer.get("text") or "").strip()
+        label = f"Question {question.id}"
+
+        if question.question_type in FeedbackQuestion.NUMERIC_TYPES:
+            ceiling = 5 if question.question_type == "rating" else 10
+            if rating is None:
+                raise serializers.ValidationError(
+                    {"answers": f"{label} needs a rating."}
+                )
+            if not 1 <= rating <= ceiling:
+                raise serializers.ValidationError(
+                    {"answers": f"{label} must be between 1 and {ceiling}."}
+                )
+            return
+
+        if rating is not None:
+            raise serializers.ValidationError(
+                {"answers": f"{label} does not take a rating."}
+            )
+        if question.is_required and not text:
+            raise serializers.ValidationError({"answers": f"{label} needs an answer."})
+        if question.question_type == FeedbackQuestion.QuestionType.CHOICE and text:
+            if text not in question.options:
+                raise serializers.ValidationError(
+                    {"answers": f"{label}: '{text}' is not one of the options."}
+                )
+        if question.question_type == FeedbackQuestion.QuestionType.YES_NO and text:
+            if text.lower() not in ("yes", "no"):
+                raise serializers.ValidationError(
+                    {"answers": f"{label} must be 'yes' or 'no'."}
+                )
+
+    def create(self, validated_data):
+        answers = validated_data.pop("answers")
+        response = FeedbackResponse.objects.create(**validated_data)
+        FeedbackAnswer.objects.bulk_create(
+            [FeedbackAnswer(response=response, **answer) for answer in answers]
+        )
+        return response

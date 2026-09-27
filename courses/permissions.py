@@ -12,6 +12,8 @@ from courses.models import (
     Course,
     CourseReview,
     Enrollment,
+    FeedbackForm,
+    FeedbackQuestion,
     Lesson,
     LessonProgress,
     LessonResource,
@@ -29,8 +31,10 @@ def course_of(obj):
         return obj.module.course
     if isinstance(obj, LessonResource):
         return obj.lesson.module.course
-    if isinstance(obj, (Batch, CourseReview, Enrollment)):
+    if isinstance(obj, (Batch, CourseReview, Enrollment, FeedbackForm)):
         return obj.course
+    if isinstance(obj, FeedbackQuestion):
+        return obj.form.course
     if isinstance(obj, LessonProgress):
         return obj.lesson.module.course
     return None

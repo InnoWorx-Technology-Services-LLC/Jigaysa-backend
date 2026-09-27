@@ -431,3 +431,115 @@ class CourseReview(TimeStampedModel):
 
     def __str__(self):
         return f"{self.student} rated {self.course} ({self.rating})"
+
+
+class FeedbackForm(TimeStampedModel):
+    """A trainer-authored questionnaire attached to a course.
+
+    Distinct from ``CourseReview``: a review is the public 1-5 star rating shown
+    on the catalog card, while a feedback form is a private structured survey
+    the trainer designs and only they (and admins) can read the answers to.
+    """
+
+    course = models.OneToOneField(
+        Course, on_delete=models.CASCADE, related_name="feedback_form"
+    )
+    title = models.CharField(max_length=255, default="Course feedback")
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    # Hides the respondent from the trainer's result views. The student FK is
+    # still stored — it is what enforces one response per student — so this is
+    # a reporting rule, not a storage one.
+    is_anonymous = models.BooleanField(default=False)
+    # Gate the form until the student has actually finished the course.
+    require_completion = models.BooleanField(default=False)
+
+    def __str__(self):
+        return f"{self.title} · {self.course}"
+
+
+class FeedbackQuestion(TimeStampedModel):
+    """One question on a ``FeedbackForm``."""
+
+    class QuestionType(models.TextChoices):
+        RATING = "rating", "Star rating (1-5)"
+        SCALE = "scale", "Numeric scale (1-10)"
+        TEXT = "text", "Free text"
+        CHOICE = "choice", "Single choice"
+        YES_NO = "yes_no", "Yes / No"
+
+    NUMERIC_TYPES = ("rating", "scale")
+
+    form = models.ForeignKey(
+        FeedbackForm, on_delete=models.CASCADE, related_name="questions"
+    )
+    question_type = models.CharField(
+        max_length=20, choices=QuestionType.choices, default=QuestionType.RATING
+    )
+    text = models.CharField(max_length=500)
+    help_text = models.CharField(max_length=255, blank=True)
+    is_required = models.BooleanField(default=True)
+    order = models.PositiveIntegerField(default=0)
+    # Options for ``choice`` questions, as a plain list of strings. A separate
+    # Choice table would buy nothing here: options carry no answer key and are
+    # always rewritten as a set.
+    options = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        ordering = ["order", "id"]
+
+    def __str__(self):
+        return f"{self.form} · Q{self.order}"
+
+
+class FeedbackResponse(TimeStampedModel):
+    """One student's completed submission of a ``FeedbackForm``."""
+
+    form = models.ForeignKey(
+        FeedbackForm, on_delete=models.CASCADE, related_name="responses"
+    )
+    student = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="feedback_responses",
+    )
+    submitted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["form", "student"], name="unique_feedback_response"
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.student} → {self.form}"
+
+
+class FeedbackAnswer(TimeStampedModel):
+    """One answer within a ``FeedbackResponse``.
+
+    Numeric answers land in ``rating`` and everything else in ``text`` so the
+    trainer summary can aggregate scores in the database instead of in Python.
+    """
+
+    response = models.ForeignKey(
+        FeedbackResponse, on_delete=models.CASCADE, related_name="answers"
+    )
+    question = models.ForeignKey(
+        FeedbackQuestion, on_delete=models.CASCADE, related_name="answers"
+    )
+    rating = models.PositiveSmallIntegerField(null=True, blank=True)
+    text = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["question__order", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["response", "question"], name="unique_feedback_answer"
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.response} · {self.question_id}"

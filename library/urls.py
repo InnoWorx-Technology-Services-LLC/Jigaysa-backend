@@ -13,5 +13,8 @@ router.register(
 router.register(
     "library-bookmarks", views.LibraryBookmarkViewSet, basename="library-bookmark"
 )
+router.register(
+    "library-categories", views.LibraryCategoryViewSet, basename="library-category"
+)
 
 urlpatterns = router.urls

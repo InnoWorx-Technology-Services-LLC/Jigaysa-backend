@@ -139,16 +139,23 @@ class PricingPlanViewSet(viewsets.ModelViewSet):
 
 
 class CoursePriceViewSet(viewsets.ModelViewSet):
-    """Course price options (PRD §3.3). Filter by ``?course=<id>``."""
+    """Course price options (PRD §3.3). Filter by ``?course=<id>``.
+
+    Reads are public: a signed-out visitor browsing the catalog still needs to
+    see what a course costs before creating an account.
+    """
 
     serializer_class = CoursePriceSerializer
     api_roles = ALL_ROLES
     api_roles_by_action = {
+        "list": ("public",), "retrieve": ("public",),
         "create": ("trainer", "admin"), "update": ("trainer", "admin"),
         "partial_update": ("trainer", "admin"), "destroy": ("trainer", "admin"),
     }
 
     def get_permissions(self):
+        if self.action in ("list", "retrieve"):
+            return [AllowAny()]
         return [IsAuthenticated()]
 
     def get_queryset(self):

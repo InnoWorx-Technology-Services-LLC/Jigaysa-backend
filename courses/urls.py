@@ -26,5 +26,13 @@ router.register(
 )
 router.register("lesson-notes", views.LessonNoteViewSet, basename="lesson-note")
 router.register("reviews", views.CourseReviewViewSet, basename="review")
+router.register(
+    "feedback-forms", views.FeedbackFormViewSet, basename="feedback-form"
+)
+router.register(
+    "feedback-responses",
+    views.FeedbackResponseViewSet,
+    basename="feedback-response",
+)
 
 urlpatterns = router.urls

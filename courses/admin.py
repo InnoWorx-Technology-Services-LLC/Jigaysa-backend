@@ -6,6 +6,10 @@ from courses.models import (
     Course,
     CourseReview,
     Enrollment,
+    FeedbackAnswer,
+    FeedbackForm,
+    FeedbackQuestion,
+    FeedbackResponse,
     Lesson,
     LessonProgress,
     LessonResource,
@@ -97,3 +101,28 @@ class LessonProgressAdmin(admin.ModelAdmin):
 class CourseReviewAdmin(admin.ModelAdmin):
     list_display = ("course", "student", "rating", "created_at")
     list_filter = ("rating",)
+
+
+class FeedbackQuestionInline(admin.TabularInline):
+    model = FeedbackQuestion
+    extra = 0
+
+
+class FeedbackAnswerInline(admin.TabularInline):
+    model = FeedbackAnswer
+    extra = 0
+
+
+@admin.register(FeedbackForm)
+class FeedbackFormAdmin(admin.ModelAdmin):
+    list_display = ("title", "course", "is_active", "is_anonymous")
+    list_filter = ("is_active", "is_anonymous", "require_completion")
+    search_fields = ("title", "course__title")
+    inlines = [FeedbackQuestionInline]
+
+
+@admin.register(FeedbackResponse)
+class FeedbackResponseAdmin(admin.ModelAdmin):
+    list_display = ("form", "student", "submitted_at")
+    search_fields = ("student__email", "form__course__title")
+    inlines = [FeedbackAnswerInline]
