@@ -77,7 +77,9 @@ Paginated (`?page=`, `?page_size=`, max 100), newest first.
   "course_type": "live_batch",
   "skill_level": "intermediate",
   "duration_minutes": 2400, "duration_hours": 40.0,
-  "thumbnail": "", "is_free": false, "is_own": false,
+  "thumbnail": "", "is_free": false,
+  "rating_avg": "4.67", "rating_count": 3,
+  "is_own": false,
   "assigned": true,
   "batches": [
     { "id": 7, "name": "Batch A · CS 2025", "learners": 120, "capacity": 150 }
@@ -86,6 +88,9 @@ Paginated (`?page=`, `?page_size=`, max 100), newest first.
 ```
 
 - **The badge** (`live` / `self-paced` / `hybrid`) is `course_type`.
+- **`rating_avg` / `rating_count`** are the public star rating, same numbers the
+  catalog card shows. `rating_count: 0` means nobody has rated it yet — render
+  "No ratings", not zero stars.
 - **`duration_hours`** is derived from `duration_minutes` server-side. The card
   prints "40 h"; six clients dividing by 60 is six chances to round
   differently.

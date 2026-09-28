@@ -295,7 +295,7 @@ class BankAccountView(APIView):
             setattr(profile, f"payout_{field}", value)
         profile.save(
             update_fields=[
-                "payout_bank_name", "payout_account_last4",
+                "payout_bank_name", "payout_account_number", "payout_ifsc",
                 "payout_account_type", "payout_account_holder", "updated_at",
             ]
         )
@@ -318,13 +318,16 @@ class BankAccountView(APIView):
         """
         profile = self._profile(request)
         profile.payout_bank_name = ""
+        profile.payout_account_number = ""
+        profile.payout_ifsc = ""
         profile.payout_account_last4 = ""
         profile.payout_account_type = ""
         profile.payout_account_holder = ""
         profile.save(
             update_fields=[
-                "payout_bank_name", "payout_account_last4",
-                "payout_account_type", "payout_account_holder", "updated_at",
+                "payout_bank_name", "payout_account_number", "payout_ifsc",
+                "payout_account_last4", "payout_account_type",
+                "payout_account_holder", "updated_at",
             ]
         )
         return Response(

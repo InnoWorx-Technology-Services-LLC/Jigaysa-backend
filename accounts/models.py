@@ -3,6 +3,7 @@ from decimal import Decimal
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
 from django.db import models
 
+from accounts.crypto import PayoutEncryptedTextField
 from accounts.managers import UserManager
 from core.models import TimeStampedModel
 
@@ -87,6 +88,13 @@ class UserProfile(TimeStampedModel):
     language = models.CharField(max_length=20, default="en")
     timezone = models.CharField(max_length=64, default="UTC")
     tags = models.ManyToManyField("courses.Tag", blank=True, related_name="profiles")
+    # Free text the member types themselves, as a plain list of strings.
+    # Deliberately not ``tags``: those are the shared course taxonomy, and a
+    # learner typing "Figma" should not mint a row every course can be filed
+    # under.
+    skills = models.JSONField(default=list, blank=True)
+    #: Hex colour behind the profile header, picked from the swatches.
+    cover_color = models.CharField(max_length=20, blank=True)
 
     def __str__(self):
         return f"Profile<{self.user.email}>"
@@ -129,21 +137,43 @@ class TrainerProfile(TimeStampedModel):
     #: such an integration exists. Empty today because none does.
     payout_account_ref = models.CharField(max_length=255, blank=True)
 
-    # --- Bank account, as displayed on the Earnings page ------------------- #
+    # --- Bank account used to settle payouts ------------------------------- #
     #
-    # Deliberately **not** a full account number. Holding one means holding a
-    # payout instrument, which needs encryption at rest, an access trail and a
-    # reason to exist — and there is no payout processor to hand it to, so the
-    # only thing storing it would achieve is the liability. These four fields
-    # are what the page renders ("HDFC •••• 8821 · Savings · Dr. Kapoor"); the
-    # real number belongs at the processor, keyed by ``payout_account_ref``.
+    # Payouts are settled by hand over NEFT/RTGS, so the platform has to hold a
+    # real account number and IFSC — there is no processor to keep them at.
+    # That makes this row a payout instrument, hence:
+    #
+    #   * ``payout_account_number`` is ciphertext at rest (accounts.crypto),
+    #     under its own key, and is never returned to the trainer or included
+    #     in any list payload — only admins read it, one payout at a time.
+    #   * ``payout_account_last4`` is derived from the number on save and is
+    #     what every trainer-facing surface renders
+    #     ("HDFC •••• 8821 · Savings · Dr. Kapoor").
+    #
+    # ``payout_account_ref`` stays for the day a processor is integrated; the
+    # number then lives there and these columns can be dropped.
     payout_bank_name = models.CharField(max_length=120, blank=True)
+    payout_account_number = PayoutEncryptedTextField(blank=True, default="")
+    payout_ifsc = models.CharField(max_length=11, blank=True)
     payout_account_last4 = models.CharField(max_length=4, blank=True)
     payout_account_type = models.CharField(max_length=20, blank=True)
     payout_account_holder = models.CharField(max_length=255, blank=True)
 
     def __str__(self):
         return f"TrainerProfile<{self.user.email}>"
+
+    def save(self, *args, **kwargs):
+        """Keep ``payout_account_last4`` derived from the number it labels.
+
+        Done here rather than in the serializer so the two cannot drift: an
+        admin edit, a shell fix or a future import all land on the same rule.
+        """
+        if self.payout_account_number:
+            self.payout_account_last4 = self.payout_account_number[-4:]
+            fields = kwargs.get("update_fields")
+            if fields is not None and "payout_account_number" in fields:
+                kwargs["update_fields"] = list(fields) + ["payout_account_last4"]
+        super().save(*args, **kwargs)
 
     @property
     def effective_revenue_share_pct(self):

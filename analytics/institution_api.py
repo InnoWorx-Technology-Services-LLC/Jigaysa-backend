@@ -651,6 +651,8 @@ class InstitutionCourseViewSet(
             "duration_hours": round(course.duration_minutes / 60.0, 1),
             "thumbnail": course.thumbnail,
             "is_free": course.is_free,
+            "rating_avg": course.rating_avg,
+            "rating_count": course.rating_count,
             # Your own programme versus one from the shared catalogue. The
             # card can badge it; the batch endpoint also lets you build on your
             # own unpublished ones, which is the visible difference.

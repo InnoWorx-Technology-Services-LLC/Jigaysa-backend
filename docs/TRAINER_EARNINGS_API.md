@@ -15,7 +15,7 @@ caller — there is no parameter to widen it.
 |---|---|
 | Four tiles **and** the revenue split | `GET /trainer/earnings/summary/` |
 | Earnings (last 12 months) | `GET /trainer/earnings/trend/` |
-| Bank account on file | `GET`/`PUT /trainer/earnings/bank-account/` |
+| Bank account on file | `GET`/`PUT`/`DELETE /trainer/earnings/bank-account/` |
 | Payouts | `GET /trainer/earnings/payouts/` |
 | The lines behind the totals | `GET /trainer/earnings/` |
 
@@ -148,32 +148,83 @@ been paid is `payout_status`.
 
 ## 7. `GET`/`PUT /trainer/earnings/bank-account/`
 
+Payouts are settled by hand over NEFT/RTGS, so this takes the **full account
+number and IFSC** — both are needed to actually send the money.
+
+### `GET` — the card
+
 ```json
-{ "bank_name": "HDFC", "account_last4": "8821",
+{ "bank_name": "HDFC", "account_last4": "8821", "ifsc": "HDFC0001234",
   "account_type": "Savings", "account_holder": "Dr. Kapoor", "is_set": true }
 ```
 
-`PUT` takes the same four fields. Use `is_set` for the empty state rather than
-guessing from four possibly-blank strings.
+**The account number is never returned**, not even to the trainer who entered
+it. They already know it; sending it back on every page load only widens where
+it can leak. `account_last4` is what confirms which account is on file, and it
+is derived server-side from the number — never sent by the client.
 
-**`DELETE` clears them.** It returns the now-empty card (`200`, not `204`) so the
-page can re-render from the response. Clearing is its own verb rather than a
-`PUT` of blanks, so "remove my details" cannot happen by accident from a
-half-filled form.
+Use `is_set` for the empty state rather than guessing from several possibly-blank
+strings.
 
-> ### ⚠️ This records where you *say* payouts should go
+### `PUT` — save it
+
+```json
+{ "bank_name": "HDFC", "account_number": "50100123458821",
+  "ifsc": "HDFC0001234", "account_type": "Savings",
+  "account_holder": "Dr. Kapoor" }
+```
+
+Returns the card shape above — again with no account number.
+
+| Field | Rules |
+|---|---|
+| `bank_name` | required, ≤ 120 |
+| `account_number` | required, **digits only**, 9–18. Spaces are stripped |
+| `ifsc` | required, exactly 11: four letters, a `0`, then six letters/digits |
+| `account_type` | optional, e.g. `Savings` / `Current` |
+| `account_holder` | optional, ≤ 255 |
+
+IFSC is upper-cased on the way in, so `hdfc0001234` is accepted and stored as
+`HDFC0001234`. It is validated against the real format because a wrong IFSC
+fails at the bank hours later, against money that has already left.
+
+`400` examples:
+
+```json
+{ "account_number": ["An account number is digits only."] }
+{ "ifsc": ["An IFSC is 11 characters: four letters, a zero, then six letters or digits — e.g. HDFC0001234."] }
+```
+
+### `DELETE` — clear them
+
+Returns the now-empty card (`200`, not `204`) so the page can re-render from the
+response. Clearing is its own verb rather than a `PUT` of blanks, so "remove my
+details" cannot happen by accident from a half-filled form. It wipes the stored
+number too — a trainer who asks for their details to be removed must not have
+them kept.
+
+> ### 🔒 This is a payout instrument — treat it as one
 >
-> It does not connect to a bank, and it **deliberately does not accept a full
-> account number** — `account_last4` must be exactly four digits, and a longer
-> value is a `400`, not a silent truncation.
+> With a number and an IFSC, money moves. So:
 >
-> Storing a full number means holding a payout instrument: encryption at rest,
-> an access trail, a breach story. There is no processor to hand it to, so the
-> only thing storing it would achieve is the liability.
+> * `payout_account_number` is **encrypted at rest** (Fernet, `enc:v1:` prefix
+>   — see `accounts.crypto`). A database dump is not a fraud kit by itself.
+> * It is keyed by **`PAYOUT_ENCRYPTION_KEY`, deliberately separate from
+>   `SOCIAL_TOKEN_KEY`.** Rotating the social key just makes trainers reconnect
+>   their accounts; rotating this one makes **every bank account on file
+>   unreadable** and every trainer has to re-enter it. Do not share the keys,
+>   and do not rotate this one casually.
+> * The IFSC and last four are **not** encrypted: a branch code is public and
+>   the last four are a label, so encrypting them would buy nothing and make
+>   them unsearchable.
+> * Only admins ever read the number back, one payout at a time, from
+>   `GET /admin/payouts/{id}/`. It appears in no trainer-facing response.
+>   The Django admin change form for a trainer profile also shows it
+>   decrypted — that is staff-only, but it is a second way in, so keep Django
+>   admin accounts tight.
 >
-> **Say this in the form.** A trainer who believes they have connected a bank
-> account, and has not, finds out at the worst possible moment. Label the field
-> "Last 4 digits" and the card "For your records".
+> **Still say in the form that this does not connect to a bank.** Nothing is
+> sent automatically — a human reads these details and makes the transfer.
 
 ---
 

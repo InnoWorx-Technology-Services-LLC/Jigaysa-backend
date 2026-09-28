@@ -1,19 +1,81 @@
+import re
+
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
-from accounts.models import Role, TrainerProfile
+from accounts.models import Role, TrainerProfile, UserProfile
 
 User = get_user_model()
+
+HEX_COLOR = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+MAX_SKILLS = 30
+MAX_SKILL_LENGTH = 50
 
 # Roles a self-service registrant may pick. Privileged roles are gated and
 # can only be assigned by an admin (e.g. via the admin site / future API).
 SELF_REGISTRABLE_ROLES = {Role.STUDENT, Role.TRAINER}
 
 
+class UserProfileSerializer(serializers.ModelSerializer):
+    """The public-facing profile, same shape for every role."""
+
+    class Meta:
+        model = UserProfile
+        fields = (
+            "headline",
+            "bio",
+            "avatar",
+            "location",
+            "website",
+            "github_url",
+            "linkedin_url",
+            "language",
+            "timezone",
+            "skills",
+            "cover_color",
+        )
+
+    def validate_skills(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Skills must be a list.")
+        cleaned = []
+        for skill in value:
+            if not isinstance(skill, str):
+                raise serializers.ValidationError("Each skill must be text.")
+            skill = skill.strip()
+            if not skill:
+                continue
+            if len(skill) > MAX_SKILL_LENGTH:
+                raise serializers.ValidationError(
+                    f"'{skill[:20]}…' is longer than {MAX_SKILL_LENGTH} characters."
+                )
+            # Case-insensitive dedupe, first spelling wins.
+            if skill.casefold() not in {s.casefold() for s in cleaned}:
+                cleaned.append(skill)
+        if len(cleaned) > MAX_SKILLS:
+            raise serializers.ValidationError(f"At most {MAX_SKILLS} skills.")
+        return cleaned
+
+    def validate_cover_color(self, value):
+        value = value.strip()
+        if value and not HEX_COLOR.match(value):
+            raise serializers.ValidationError(
+                "Use a hex colour such as #8FD14F."
+            )
+        return value
+
+
 class UserSerializer(serializers.ModelSerializer):
-    """Read/update the current user's profile. Role is read-only here."""
+    """Read/update the current user's account and profile.
+
+    The profile page saves its whole form in one PATCH, so the profile is
+    nested here rather than sitting behind a second endpoint the client would
+    have to keep in step.
+    """
+
+    profile = UserProfileSerializer(required=False)
 
     class Meta:
         model = User
@@ -27,6 +89,7 @@ class UserSerializer(serializers.ModelSerializer):
             "organization",
             "is_active",
             "date_joined",
+            "profile",
         )
         read_only_fields = (
             "id",
@@ -39,6 +102,32 @@ class UserSerializer(serializers.ModelSerializer):
         )
 
     date_joined = serializers.DateTimeField(source="created_at", read_only=True)
+
+    @staticmethod
+    def _profile_for(user):
+        """The profile row, with the instance's cached relation refreshed.
+
+        ``request.user`` is a long-lived object that can carry a relation cached
+        before this request — reading straight through ``user.profile`` then
+        serialises a stale row, or reports one that has since been deleted.
+        """
+        profile, _ = UserProfile.objects.get_or_create(user=user)
+        user.profile = profile
+        return profile
+
+    def to_representation(self, instance):
+        self._profile_for(instance)
+        return super().to_representation(instance)
+
+    def update(self, instance, validated_data):
+        profile_data = validated_data.pop("profile", None)
+        user = super().update(instance, validated_data)
+        if profile_data is not None:
+            profile = self._profile_for(user)
+            for field, value in profile_data.items():
+                setattr(profile, field, value)
+            profile.save()
+        return user
 
 
 class RegisterSerializer(serializers.ModelSerializer):

@@ -442,6 +442,8 @@ class InstitutionCourseSerializer(serializers.Serializer):
     duration_hours = serializers.FloatField()
     thumbnail = serializers.CharField(allow_blank=True)
     is_free = serializers.BooleanField()
+    rating_avg = serializers.DecimalField(max_digits=3, decimal_places=2)
+    rating_count = serializers.IntegerField()
     is_own = serializers.BooleanField()
     assigned = serializers.BooleanField()
     batches = InstitutionCourseBatchSerializer(many=True)

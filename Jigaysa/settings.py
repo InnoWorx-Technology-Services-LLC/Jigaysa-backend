@@ -287,10 +287,16 @@ SOCIAL_OAUTH_REDIRECT_BASE = env("SOCIAL_OAUTH_REDIRECT_BASE", default="")
 # token undecryptable and forces every trainer to reconnect.
 SOCIAL_TOKEN_KEY = env("SOCIAL_TOKEN_KEY", default="")
 
+# Fernet key encrypting trainer bank account numbers (core.crypto). Generate
+# the same way as SOCIAL_TOKEN_KEY, but keep it a *separate* key: rotating the
+# social key merely forces trainers to reconnect, while losing this one makes
+# every bank account on file unreadable and they must all be re-entered.
+PAYOUT_ENCRYPTION_KEY = env("PAYOUT_ENCRYPTION_KEY", default="")
+
 # LinkedIn versions its REST API by month and rejects a call without the header.
 # Pinned rather than tracking "latest" so their release schedule cannot break
 # publishing on a random morning; move it forward deliberately, roughly yearly.
-LINKEDIN_API_VERSION = env("LINKEDIN_API_VERSION", default="202405")
+LINKEDIN_API_VERSION = env("LINKEDIN_API_VERSION", default="202609")
 
 # Where a promoted post sends people. Joined to the *origin* of FRONTEND_URL,
 # not to FRONTEND_URL itself, which carries the student app's own path segment

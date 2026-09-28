@@ -151,7 +151,7 @@ IMAGES_URL = "https://api.linkedin.com/rest/images"
 #: header. Pinned in settings rather than hardcoded because it has to be moved
 #: forward roughly yearly — an unpinned "latest" would break on their schedule
 #: instead of ours.
-DEFAULT_API_VERSION = "202405"
+DEFAULT_API_VERSION = "202609"
 
 
 def _api_version() -> str:

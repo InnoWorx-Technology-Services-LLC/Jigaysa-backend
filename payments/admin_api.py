@@ -233,11 +233,13 @@ class AdminPayoutViewSet(
 ):
     """The trainer payout queue.
 
-    > **Read-only, and nothing computes these rows yet.** ``TrainerPayout`` is
-    > populated by no code path in this release — the revenue-share percentage
-    > is recorded on trainer profiles, but nothing turns settled orders into
-    > payout rows. This endpoint reads a table that is empty in production, and
-    > says so rather than implying a queue that is merely quiet.
+    Rows are created by ``manage.py generate_trainer_payouts``, which sweeps
+    earnings older than ``TRAINER_PAYOUT_HOLD_DAYS`` into one payout per
+    trainer per period. Run it monthly; an empty queue means it has not run.
+
+    > **Nothing here moves money.** There is no payout processor. Each row
+    > carries the trainer's full bank details so someone can settle it over
+    > NEFT/RTGS, and ``mark-paid`` records that they did.
     """
 
     serializer_class = AdminPayoutSerializer
@@ -245,9 +247,9 @@ class AdminPayoutViewSet(
     api_roles = ("admin",)
 
     def get_queryset(self):
-        queryset = TrainerPayout.objects.select_related("trainer").order_by(
-            "status", "-period_end", "-created_at"
-        )
+        queryset = TrainerPayout.objects.select_related(
+            "trainer", "trainer__trainer_profile"
+        ).order_by("status", "-period_end", "-created_at")
         state = self.request.query_params.get("status", "").strip()
         if state in dict(TrainerPayout.Status.choices):
             queryset = queryset.filter(status=state)

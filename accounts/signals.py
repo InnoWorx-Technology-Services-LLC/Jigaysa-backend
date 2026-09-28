@@ -1,17 +1,15 @@
-"""Keep a ``TrainerProfile`` in step with every trainer account.
+"""Keep profile rows in step with every account.
 
 Registered in ``AccountsConfig.ready()``.
 
-Without this the profile row only ever existed in the demo seed, so a trainer
-who signed up through the API had none — and since a mentor is discovered by
-``trainer_profile__is_approved``, they could never be approved or booked. The
-row is created unapproved: existing is not the same as being allowed to teach.
+Without this the profile rows only ever existed in the demo seed, so anyone who
+signed up through the API had none.
 """
 
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
-from accounts.models import Role, TrainerProfile, User
+from accounts.models import Role, TrainerProfile, User, UserProfile
 
 
 @receiver(post_save, sender=User, dispatch_uid="ensure_trainer_profile")
@@ -27,3 +25,13 @@ def ensure_trainer_profile(sender, instance, **kwargs):
     if instance.role != Role.TRAINER:
         return
     TrainerProfile.objects.get_or_create(user=instance)
+
+
+@receiver(post_save, sender=User, dispatch_uid="ensure_user_profile")
+def ensure_user_profile(sender, instance, **kwargs):
+    """Every account gets the public profile shown on the dashboard header.
+
+    Role-agnostic: a student's headline and a trainer's live in the same row,
+    so ``/auth/me/`` has somewhere to write for whoever is signed in.
+    """
+    UserProfile.objects.get_or_create(user=instance)

@@ -199,7 +199,8 @@ def test_bank_details_can_be_cleared(trainer):
     _api(trainer).put(
         BANK,
         {
-            "bank_name": "HDFC", "account_last4": "8821",
+            "bank_name": "HDFC", "account_number": "50100123458821",
+            "ifsc": "HDFC0001234",
             "account_type": "Savings", "account_holder": "Dr. Kapoor",
         },
         format="json",

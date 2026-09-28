@@ -1,5 +1,7 @@
 """Serializers for pricing, checkout, invoices and subscriptions (§3.3/3.4/3.13)."""
 
+import re
+
 from rest_framework import serializers
 
 from payments.models import (
@@ -279,21 +281,36 @@ class RefundCreateSerializer(serializers.Serializer):
 
 
 class AdminPayoutSerializer(serializers.ModelSerializer):
-    """A row in the trainer payout queue. Read-only — nothing writes these yet."""
+    """A row in the trainer payout queue.
+
+    Carries the trainer's **full** bank details, because settling a payout means
+    typing them into net banking and this is the screen where that happens.
+    Admin-only, and the reason ``AdminBankAccountSerializer`` exists separately
+    from the trainer-facing one.
+    """
 
     trainer_email = serializers.EmailField(source="trainer.email", read_only=True)
     trainer_name = serializers.CharField(
         source="trainer.full_name", read_only=True, default=""
     )
+    bank_account = serializers.SerializerMethodField()
 
     class Meta:
         model = TrainerPayout
         fields = (
             "id", "trainer", "trainer_email", "trainer_name", "period_start",
             "period_end", "gross", "platform_fee", "net", "status", "paid_at",
-            "created_at",
+            "bank_account", "created_at",
         )
         read_only_fields = fields
+
+    def get_bank_account(self, obj):
+        """``None`` when the trainer has entered nothing — which is the signal
+        that this payout cannot be settled yet, not an error."""
+        profile = getattr(obj.trainer, "trainer_profile", None)
+        if profile is None:
+            return None
+        return AdminBankAccountSerializer(profile).data
 
 
 # --------------------------------------------------------------------------- #
@@ -369,13 +386,26 @@ class TrainerPayoutSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+#: An IFSC is four letters (bank), a reserved ``0``, then six alphanumerics
+#: (branch). Validated because a wrong one fails at the bank, hours later,
+#: against money that has already left.
+IFSC_RE = re.compile(r"^[A-Z]{4}0[A-Z0-9]{6}$")
+
+
 class BankAccountSerializer(serializers.ModelSerializer):
-    """The "Bank account on file" card. Never a full account number."""
+    """The "Bank account on file" card — the trainer's own view.
+
+    Deliberately **never** returns the account number, not even to the trainer
+    who entered it. They already know it, so sending it back on every page load
+    only widens where it can leak. The last four digits confirm which account
+    is on file, which is the only thing the card has to answer.
+    """
 
     bank_name = serializers.CharField(source="payout_bank_name", read_only=True)
     account_last4 = serializers.CharField(
         source="payout_account_last4", read_only=True
     )
+    ifsc = serializers.CharField(source="payout_ifsc", read_only=True)
     account_type = serializers.CharField(
         source="payout_account_type", read_only=True
     )
@@ -387,32 +417,58 @@ class BankAccountSerializer(serializers.ModelSerializer):
     class Meta:
         model = TrainerProfile
         fields = (
-            "bank_name", "account_last4", "account_type", "account_holder",
-            "is_set",
+            "bank_name", "account_last4", "ifsc", "account_type",
+            "account_holder", "is_set",
         )
         read_only_fields = fields
 
     def get_is_set(self, obj) -> bool:
-        """One flag, so the card doesn't guess from four possibly-blank strings."""
-        return bool(obj.payout_bank_name and obj.payout_account_last4)
+        """One flag, so the card doesn't guess from several possibly-blank strings."""
+        return bool(
+            obj.payout_bank_name and obj.payout_account_last4 and obj.payout_ifsc
+        )
+
+
+class AdminBankAccountSerializer(BankAccountSerializer):
+    """The same card **plus the full account number**, for whoever settles the
+    payout. Admin-only: never mount this on a trainer-facing view."""
+
+    account_number = serializers.CharField(
+        source="payout_account_number", read_only=True
+    )
+
+    class Meta(BankAccountSerializer.Meta):
+        fields = BankAccountSerializer.Meta.fields + ("account_number",)
+        read_only_fields = fields
 
 
 class BankAccountUpdateSerializer(serializers.Serializer):
     """Body of ``PUT /trainer/earnings/bank-account/``.
 
-    Takes the **last four digits only**. A full account number is refused, not
-    truncated — silently keeping four digits of a number someone believed they
-    had registered is worse than telling them we do not take it.
+    Takes the **full** account number and IFSC, because payouts are settled by
+    hand over NEFT/RTGS and both are needed to send the money. The number is
+    encrypted at rest and never read back — see ``accounts.crypto``.
     """
 
     bank_name = serializers.CharField(max_length=120)
-    account_last4 = serializers.CharField(max_length=4, min_length=4)
+    account_number = serializers.CharField(max_length=18, min_length=9)
+    ifsc = serializers.CharField(max_length=11, min_length=11)
     account_type = serializers.CharField(max_length=20, allow_blank=True, default="")
     account_holder = serializers.CharField(max_length=255, allow_blank=True, default="")
 
-    def validate_account_last4(self, value):
+    def validate_account_number(self, value):
+        value = value.replace(" ", "")
         if not value.isdigit():
             raise serializers.ValidationError(
-                "Enter the last four digits of the account number."
+                "An account number is digits only."
+            )
+        return value
+
+    def validate_ifsc(self, value):
+        value = value.strip().upper()
+        if not IFSC_RE.match(value):
+            raise serializers.ValidationError(
+                "An IFSC is 11 characters: four letters, a zero, then six "
+                "letters or digits — e.g. HDFC0001234."
             )
         return value

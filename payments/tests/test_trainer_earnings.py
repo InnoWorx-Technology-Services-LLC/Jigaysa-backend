@@ -421,12 +421,15 @@ def test_bank_account_starts_unset(trainer):
     assert data["account_last4"] == ""
 
 
-def test_bank_account_records_only_the_last_four_digits(trainer):
+def test_bank_account_records_the_full_number_and_ifsc(trainer):
+    """Payouts are settled by hand over NEFT, so both are needed to send money.
+    The card still shows only the last four — see ``test_bank_account.py``."""
     resp = _api(trainer).put(
         BANK_URL,
         {
             "bank_name": "HDFC",
-            "account_last4": "8821",
+            "account_number": "50100123458821",
+            "ifsc": "HDFC0001234",
             "account_type": "Savings",
             "account_holder": "Dr. Kapoor",
         },
@@ -435,22 +438,24 @@ def test_bank_account_records_only_the_last_four_digits(trainer):
     assert resp.status_code == status.HTTP_200_OK
     assert resp.data["is_set"] is True
     assert resp.data["account_last4"] == "8821"
+    assert resp.data["ifsc"] == "HDFC0001234"
     assert resp.data["bank_name"] == "HDFC"
 
 
-def test_a_full_account_number_is_refused_not_truncated(trainer):
-    """Silently keeping four digits of a number someone believed they had
-    registered is worse than saying we do not take it."""
+def test_bank_account_needs_an_ifsc(trainer):
+    """An account number alone cannot be paid to."""
     resp = _api(trainer).put(
         BANK_URL,
-        {"bank_name": "HDFC", "account_last4": "50100123456789"},
+        {"bank_name": "HDFC", "account_number": "50100123458821"},
         format="json",
     )
     assert resp.status_code == status.HTTP_400_BAD_REQUEST
 
 
-def test_non_numeric_last4_is_refused(trainer):
+def test_non_numeric_account_number_is_refused(trainer):
     resp = _api(trainer).put(
-        BANK_URL, {"bank_name": "HDFC", "account_last4": "abcd"}, format="json"
+        BANK_URL,
+        {"bank_name": "HDFC", "account_number": "abcdefghij", "ifsc": "HDFC0001234"},
+        format="json",
     )
     assert resp.status_code == status.HTTP_400_BAD_REQUEST
